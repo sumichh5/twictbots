@@ -9,7 +9,9 @@
     "start:mock": "node src/index.js --mock",
     "validate": "node src/index.js --validate",
     "validate:mock": "node src/index.js --mock --validate",
-    "check": "node --check src/index.js && node --check src/config.js && node --check src/modules/twitch.js && node --check src/modules/mock-twitch.js && node --check src/modules/telegram.js && node --check src/modules/discord.js && node --check src/modules/notifier.js && node --check src/modules/state-store.js && node --check src/modules/monitor.js && node --check src/utils/logger.js && node --check src/utils/http.js && node --check src/utils/retry.js && node --check src/utils/formatters.js"
+    "check": "node --check src/index.js && node --check src/config.js && node --check src/modules/twitch.js && node --check src/modules/mock-twitch.js && node --check src/modules/telegram.js && node --check src/modules/discord.js && node --check src/modules/notifier.js && node --check src/modules/state-store.js && node --check src/modules/monitor.js && node --check src/utils/logger.js && node --check src/utils/http.js && node --check src/utils/retry.js && node --check src/utils/formatters.js && node --check cloudflare/worker.mjs",
+    "cf:dev": "npx wrangler dev --test-scheduled",
+    "cf:deploy": "npx wrangler deploy"
   },
   "engines": {
     "node": ">=18.18.0"

@@ -1,0 +1,23 @@
+name = "twictbots-live-notifier"
+main = "cloudflare/worker.mjs"
+compatibility_date = "2026-03-15"
+
+[triggers]
+crons = ["* * * * *"]
+
+[vars]
+APP_NAME = "Wooflyaa Live Notifier"
+LOG_LEVEL = "info"
+REQUEST_TIMEOUT_MS = "10000"
+MAX_RETRIES = "2"
+TIME_ZONE = "Europe/Kiev"
+ENABLE_TELEGRAM = "true"
+ENABLE_DISCORD = "true"
+DISCORD_USERNAME = "Wooflyaa Live Alerts"
+DISCORD_AVATAR_URL = "https://static.twitchcdn.net/assets/favicon-32-e29e246c157142c94346.png"
+STREAMERS_JSON = """{"streamers":[{"url":"https://www.twitch.tv/Wooflyaa","label":"Wooflyaa","accentColor":"#E11D48"}]}"""
+
+# Cloudflare can now auto-provision KV bindings during deploys from Wrangler
+# and from dashboard/Git builds when the resource ID is omitted.
+[[kv_namespaces]]
+binding = "STATE_KV"

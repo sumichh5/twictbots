@@ -1,0 +1,20 @@
+{
+  "name": "twitch-stream-notifier",
+  "version": "1.0.0",
+  "description": "Ready-to-run Twitch stream notifier for Telegram and Discord.",
+  "main": "src/index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node src/index.js",
+    "start:mock": "node src/index.js --mock",
+    "validate": "node src/index.js --validate",
+    "validate:mock": "node src/index.js --mock --validate",
+    "check": "node --check src/index.js && node --check src/config.js && node --check src/modules/twitch.js && node --check src/modules/mock-twitch.js && node --check src/modules/telegram.js && node --check src/modules/discord.js && node --check src/modules/notifier.js && node --check src/modules/state-store.js && node --check src/modules/monitor.js && node --check src/utils/logger.js && node --check src/utils/http.js && node --check src/utils/retry.js && node --check src/utils/formatters.js"
+  },
+  "engines": {
+    "node": ">=18.18.0"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5"
+  }
+}

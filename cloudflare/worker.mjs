@@ -886,12 +886,13 @@ async function sendDiscordAlert(payload, config, logger) {
   await request(config.discord.webhookUrl, {
     method: "POST",
     body: {
-      username: config.discord.username,
-      avatar_url: config.discord.avatarUrl,
-      allowed_mentions: {
-        parse: []
-      },
-      embeds: [
+  username: config.discord.username,
+  avatar_url: config.discord.avatarUrl,
+  content: "@everyone",
+  allowed_mentions: {
+    parse: ["everyone"]
+  },
+  embeds: [
         {
           color: toDiscordColor(payload.streamer.accentColor),
           author: {

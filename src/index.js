@@ -31,7 +31,8 @@ async function main() {
     logger.info("Configuration is valid.", {
       streamers: config.streamers.map((streamer) => streamer.login),
       telegramEnabled: config.telegram.enabled,
-      discordEnabled: config.discord.enabled
+      discordEnabled: config.discord.enabled,
+      discordTestEnabled: config.discordTest.enabled
     });
     return;
   }
@@ -60,13 +61,24 @@ async function main() {
   const discordNotifier = new DiscordNotifier(
     {
       ...config.discord,
+      name: "discord",
       requestTimeoutMs: config.app.requestTimeoutMs,
       maxRetries: config.app.maxRetries
     },
     logger
   );
 
-  const notifier = new NotificationDispatcher([telegramNotifier, discordNotifier], logger);
+  const discordTestNotifier = new DiscordNotifier(
+    {
+      ...config.discordTest,
+      name: "discord_test",
+      requestTimeoutMs: config.app.requestTimeoutMs,
+      maxRetries: config.app.maxRetries
+    },
+    logger
+  );
+
+  const notifier = new NotificationDispatcher([telegramNotifier, discordNotifier, discordTestNotifier], logger);
   const stateStore = new StateStore(config.app.stateFile, logger);
   const monitor = new StreamMonitor({
     config,

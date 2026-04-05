@@ -28,6 +28,10 @@ Add these as Worker secrets:
 - `TELEGRAM_CHAT_ID`
 - `DISCORD_WEBHOOK_URL`
 
+Optional Worker vars:
+
+- `DISCORD_MENTION_EVERYONE=true` to ping `@everyone` in Discord alerts.
+
 If you only want one channel, either:
 
 - keep only Telegram secrets, or

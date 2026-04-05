@@ -3,7 +3,7 @@ const { formatLocalDateTime, toDiscordColor, truncate } = require("../utils/form
 
 class DiscordNotifier {
   constructor(config, logger) {
-    this.name = "discord";
+    this.name = config.name || "discord";
     this.config = config;
     this.logger = logger;
   }
@@ -12,13 +12,25 @@ class DiscordNotifier {
     return this.config.enabled;
   }
 
-  buildEmbed(payload) {
+  isTestVariant() {
+    return this.config.variant === "test";
+  }
+
+  buildEmbeds(payload) {
     const startedAtLabel = formatLocalDateTime(payload.stream.startedAt, payload.app.timeZone);
 
+    if (this.isTestVariant()) {
+      return [this.buildTestEmbed(payload, startedAtLabel)];
+    }
+
+    return [this.buildDefaultEmbed(payload, startedAtLabel)];
+  }
+
+  buildDefaultEmbed(payload, startedAtLabel) {
     return {
       color: toDiscordColor(payload.streamer.accentColor),
       author: {
-        name: `${payload.streamer.displayName} on Twitch`,
+        name: `${payload.streamer.displayName} • Twitch`,
         url: payload.stream.channelUrl,
         icon_url: payload.streamer.profileImageUrl || this.config.avatarUrl
       },
@@ -32,12 +44,12 @@ class DiscordNotifier {
           inline: true
         },
         {
-          name: "Старт",
+          name: "Начало",
           value: startedAtLabel,
           inline: true
         },
         {
-          name: "Канал",
+          name: "Ссылка",
           value: `[Открыть Twitch](${payload.stream.channelUrl})`,
           inline: true
         }
@@ -53,22 +65,77 @@ class DiscordNotifier {
           }
         : undefined,
       footer: {
-        text: `${payload.app.name} • live alert`
+        text: `${payload.app.name} • уведомление о стриме`
       },
       timestamp: payload.stream.startedAt
     };
   }
 
+  buildTestEmbed(payload, startedAtLabel) {
+    const previewImageUrl = this.config.gifUrl || payload.stream.thumbnailUrl;
+
+    return {
+      color: toDiscordColor(payload.streamer.accentColor, 0xe11d48),
+      author: {
+        name: `${payload.streamer.displayName} • тестовый канал`,
+        url: payload.stream.channelUrl,
+        icon_url: payload.streamer.profileImageUrl || this.config.avatarUrl
+      },
+      title: `Сейчас в эфире: ${payload.streamer.displayName}`,
+      url: payload.stream.channelUrl,
+      description: [
+        `> ${truncate(payload.stream.title, 220)}`,
+        "",
+        "Тестовая копия боевого уведомления отправлена в отдельный канал.",
+        "",
+        `[Смотреть на Twitch](${payload.stream.channelUrl})`
+      ].join("\n"),
+      fields: [
+        {
+          name: "Категория",
+          value: payload.stream.gameName,
+          inline: true
+        },
+        {
+          name: "Начало",
+          value: startedAtLabel,
+          inline: true
+        },
+        {
+          name: "Статус",
+          value: "Тест • @everyone",
+          inline: true
+        }
+      ],
+      image: previewImageUrl
+        ? {
+            url: previewImageUrl
+          }
+        : undefined,
+      footer: {
+        text: `${payload.app.name} • тестовый прогон`
+      },
+      timestamp: payload.stream.startedAt
+    };
+  }
+
+  buildMessageContent(mentionEveryone) {
+    return mentionEveryone ? "@everyone" : undefined;
+  }
+
   async sendLiveAlert(payload) {
+    const mentionEveryone = this.config.mentionEveryone === true;
+
     await request(this.config.webhookUrl, {
       method: "POST",
       body: {
         username: this.config.username,
         avatar_url: this.config.avatarUrl,
+        content: this.buildMessageContent(mentionEveryone),
         allowed_mentions: {
-          parse: []
+          parse: mentionEveryone ? ["everyone"] : []
         },
-        embeds: [this.buildEmbed(payload)]
+        embeds: this.buildEmbeds(payload)
       },
       timeoutMs: this.config.requestTimeoutMs,
       retries: this.config.maxRetries,

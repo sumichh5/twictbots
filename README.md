@@ -145,6 +145,7 @@ TELEGRAM_CHAT_ID=-1001234567890
 ```env
 ENABLE_DISCORD=true
 DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/replace/me
+DISCORD_MENTION_EVERYONE=true
 ```
 
 ### Важно
@@ -203,6 +204,7 @@ TELEGRAM_CHAT_ID=-1001234567890
 
 ENABLE_DISCORD=true
 DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/replace/me
+DISCORD_MENTION_EVERYONE=true
 DISCORD_USERNAME=Twitch Live Alerts
 DISCORD_AVATAR_URL=https://static.twitchcdn.net/assets/favicon-32-e29e246c157142c94346.png
 ```

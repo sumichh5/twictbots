@@ -13,7 +13,9 @@ class NotificationDispatcher {
     const enabled = this.getEnabledNotifiers();
     if (enabled.length === 0) {
       if (!this.warnedNoChannels) {
-        this.logger.warn("No delivery channels enabled. Set ENABLE_TELEGRAM or ENABLE_DISCORD to true.");
+        this.logger.warn(
+          "No delivery channels enabled. Configure Telegram, Discord, or DISCORD_TEST_WEBHOOK_URL."
+        );
         this.warnedNoChannels = true;
       }
       return [];

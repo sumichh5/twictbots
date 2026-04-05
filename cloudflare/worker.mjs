@@ -41,6 +41,10 @@ export default {
       });
     }
 
+    if (url.pathname === "/test/discord") {
+      return handleDiscordTestRequest(request, env);
+    }
+
     return jsonResponse({
       ok: summary.ready,
       message: summary.ready
@@ -62,7 +66,8 @@ async function runMonitor(env, logger) {
     appName: config.app.name,
     streamers: config.streamers.map((streamer) => streamer.login),
     telegramEnabled: config.telegram.enabled,
-    discordEnabled: config.discord.enabled
+    discordEnabled: config.discord.enabled,
+    discordTestEnabled: config.discordTest.enabled
   });
 
   const state = await loadState(env);
@@ -123,17 +128,59 @@ async function runMonitor(env, logger) {
   });
 }
 
+async function handleDiscordTestRequest(request, env) {
+  const auth = authorizeTestRequest(request, env);
+  if (!auth.ok) {
+    return jsonResponse(
+      {
+        ok: false,
+        message: auth.message
+      },
+      { status: auth.status }
+    );
+  }
+
+  const logger = createLogger(env);
+  const config = loadConfig(env, { strict: false });
+  const url = new URL(request.url);
+  const target = normalizeDiscordTestTarget(url.searchParams.get("channel"));
+
+  if (!target) {
+    return jsonResponse(
+      {
+        ok: false,
+        message: "Invalid channel. Use main, test, or both."
+      },
+      { status: 400 }
+    );
+  }
+
+  const payload = createManualDiscordTestPayload(config, {
+    title: url.searchParams.get("title")
+  });
+  const results = await dispatchManualDiscordTest(target, payload, config, logger);
+
+  return jsonResponse({
+    ok: results.some((result) => result.delivered),
+    target,
+    results
+  });
+}
+
 function summarizeConfiguration(env) {
   try {
     const config = loadConfig(env, { strict: false });
 
     return {
-      ready: config.missing.length === 0 && (config.telegram.enabled || config.discord.enabled),
+      ready:
+        config.missing.length === 0 &&
+        (config.telegram.enabled || config.discord.enabled || config.discordTest.enabled),
       appName: config.app.name,
       streamers: config.streamers.map((streamer) => streamer.login),
       channels: {
         telegram: config.telegram.enabled,
-        discord: config.discord.enabled
+        discord: config.discord.enabled,
+        discordTest: config.discordTest.enabled
       },
       stateKvBound: Boolean(env.STATE_KV),
       missing: config.missing
@@ -145,7 +192,8 @@ function summarizeConfiguration(env) {
       streamers: [],
       channels: {
         telegram: false,
-        discord: false
+        discord: false,
+        discordTest: false
       },
       stateKvBound: Boolean(env.STATE_KV),
       missing: [error.message]
@@ -156,6 +204,8 @@ function summarizeConfiguration(env) {
 function loadConfig(env, options = {}) {
   const strict = options.strict !== false;
   const streamers = parseStreamers(readString(env.STREAMERS_JSON, DEFAULT_STREAMERS_JSON));
+  const defaultDiscordUsername = "Wooflyaa Live Alerts";
+  const defaultDiscordAvatarUrl = "https://static.twitchcdn.net/assets/favicon-32-e29e246c157142c94346.png";
   const app = {
     name: readString(env.APP_NAME, "Wooflyaa Live Notifier"),
     requestTimeoutMs: readNumber(env.REQUEST_TIMEOUT_MS, 10000),
@@ -181,11 +231,32 @@ function loadConfig(env, options = {}) {
   const discord = {
     enabled: discordRequested && Boolean(readString(env.DISCORD_WEBHOOK_URL)),
     webhookUrl: readString(env.DISCORD_WEBHOOK_URL),
-    username: readString(env.DISCORD_USERNAME, "Wooflyaa Live Alerts"),
-    avatarUrl: readString(
-      env.DISCORD_AVATAR_URL,
-      "https://static.twitchcdn.net/assets/favicon-32-e29e246c157142c94346.png"
-    )
+    mentionEveryone: readBoolean(env.DISCORD_MENTION_EVERYONE, false),
+    username: readString(env.DISCORD_USERNAME, defaultDiscordUsername),
+    avatarUrl: readString(env.DISCORD_AVATAR_URL, defaultDiscordAvatarUrl),
+    requestTimeoutMs: app.requestTimeoutMs,
+    maxRetries: app.maxRetries,
+    footerLabel: "live alert",
+    variant: "default"
+  };
+
+  const discordTest = {
+    enabled: Boolean(readString(env.DISCORD_TEST_WEBHOOK_URL)),
+    webhookUrl: readString(env.DISCORD_TEST_WEBHOOK_URL),
+    mentionEveryone: readBoolean(env.DISCORD_TEST_MENTION_EVERYONE, false),
+    username: readString(
+      env.DISCORD_TEST_USERNAME,
+      `${readString(env.DISCORD_USERNAME, defaultDiscordUsername)} ТЕСТ`
+    ),
+    avatarUrl: readString(env.DISCORD_TEST_AVATAR_URL, readString(env.DISCORD_AVATAR_URL, defaultDiscordAvatarUrl)),
+    gifUrl: readString(
+      env.DISCORD_TEST_GIF_URL,
+      "https://media1.giphy.com/media/v1.Y2lkPTc5MGI3NjExcjRlYWN6aXZsYnZycTdnN2M4bGI3OXd2c2NkNmltNmpvc2F2Y3F4NyZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9Zw/HSyR7A954pdC4w6PHa/giphy.gif"
+    ),
+    requestTimeoutMs: app.requestTimeoutMs,
+    maxRetries: app.maxRetries,
+    footerLabel: readString(env.DISCORD_TEST_FOOTER_LABEL, "тестовое уведомление"),
+    variant: "test"
   };
 
   const missing = [];
@@ -211,9 +282,156 @@ function loadConfig(env, options = {}) {
     twitch,
     telegram,
     discord,
+    discordTest,
     streamers,
     missing
   };
+}
+
+function authorizeTestRequest(request, env) {
+  const expectedToken = readString(env.TEST_TRIGGER_TOKEN);
+  if (!expectedToken) {
+    return {
+      ok: false,
+      status: 503,
+      message: "TEST_TRIGGER_TOKEN is not configured."
+    };
+  }
+
+  const url = new URL(request.url);
+  const bearerToken = readBearerToken(request.headers.get("authorization"));
+  const providedToken =
+    url.searchParams.get("token") || request.headers.get("x-test-token") || bearerToken || "";
+
+  if (!providedToken) {
+    return {
+      ok: false,
+      status: 401,
+      message: "Missing test token."
+    };
+  }
+
+  if (providedToken !== expectedToken) {
+    return {
+      ok: false,
+      status: 403,
+      message: "Invalid test token."
+    };
+  }
+
+  return {
+    ok: true,
+    status: 200,
+    message: "Authorized."
+  };
+}
+
+function readBearerToken(value) {
+  const raw = String(value || "").trim();
+  if (!raw.toLowerCase().startsWith("bearer ")) {
+    return "";
+  }
+
+  return raw.slice(7).trim();
+}
+
+function normalizeDiscordTestTarget(value) {
+  const normalized = String(value || "test").trim().toLowerCase();
+  if (normalized === "main" || normalized === "discord") {
+    return "main";
+  }
+  if (normalized === "test" || normalized === "discord_test") {
+    return "test";
+  }
+  if (normalized === "both") {
+    return "both";
+  }
+
+  return "";
+}
+
+function createManualDiscordTestPayload(config, options = {}) {
+  const sourceStreamer = config.streamers[0];
+  const login = sourceStreamer ? sourceStreamer.login : "wooflyaa";
+  const displayName = sourceStreamer ? sourceStreamer.label || sourceStreamer.login : "Wooflyaa";
+  const channelUrl = buildTwitchUrl(login);
+  const startedAt = new Date().toISOString();
+
+  return {
+    app: {
+      name: config.app.name,
+      timeZone: config.app.timeZone
+    },
+    streamer: {
+      login,
+      displayName,
+      accentColor: sourceStreamer ? sourceStreamer.accentColor : "#E11D48",
+      profileImageUrl: sourceStreamer ? sourceStreamer.profileImageUrl || "" : "",
+      channelUrl
+    },
+    stream: {
+      id: `manual-test-${Date.now()}`,
+      title: String(options.title || "Проверка оформления уведомления").trim(),
+      gameName: "Тестовый запуск",
+      startedAt,
+      thumbnailUrl: "",
+      viewerCount: 1,
+      language: "ru",
+      channelUrl
+    }
+  };
+}
+
+async function dispatchManualDiscordTest(target, payload, config, logger) {
+  const channels = [];
+
+  if ((target === "main" || target === "both") && config.discord.enabled) {
+    channels.push({
+      name: "discord",
+      send: () => sendDiscordAlert(payload, config.discord, logger)
+    });
+  }
+
+  if ((target === "test" || target === "both") && config.discordTest.enabled) {
+    channels.push({
+      name: "discord_test",
+      send: () => sendDiscordAlert(payload, config.discordTest, logger)
+    });
+  }
+
+  if (channels.length === 0) {
+    return [
+      {
+        channel: target,
+        delivered: false,
+        message: "Requested Discord channel is not configured."
+      }
+    ];
+  }
+
+  const settled = await Promise.allSettled(
+    channels.map(async (channel) => {
+      await channel.send();
+      return {
+        channel: channel.name,
+        delivered: true
+      };
+    })
+  );
+
+  return settled.map((result, index) => {
+    const channel = channels[index];
+    if (result.status === "fulfilled") {
+      return result.value;
+    }
+
+    logger.error(`Manual test delivery failed for ${channel.name}.`, result.reason);
+    return {
+      channel: channel.name,
+      delivered: false,
+      message: result.reason && result.reason.message ? result.reason.message : "Unknown error."
+    };
+  });
 }
 
 function parseStreamers(rawValue) {
@@ -783,14 +1001,20 @@ async function dispatchLiveAlert(payload, state, config, logger) {
   if (config.discord.enabled) {
     channels.push({
       name: "discord",
-      send: () => sendDiscordAlert(payload, config, logger)
+      send: () => sendDiscordAlert(payload, config.discord, logger)
+    });
+  }
+  if (config.discordTest.enabled) {
+    channels.push({
+      name: "discord_test",
+      send: () => sendDiscordAlert(payload, config.discordTest, logger)
     });
   }
 
   if (channels.length === 0) {
     if (!warnedNoChannels) {
       warnedNoChannels = true;
-      logger.warn("No delivery channels enabled. Configure Telegram or Discord secrets.");
+      logger.warn("No delivery channels enabled. Configure Telegram, Discord, or test Discord secrets.");
     }
     return [];
   }
@@ -882,65 +1106,134 @@ async function sendTelegramAlert(payload, config, logger) {
   }, config, logger);
 }
 
-async function sendDiscordAlert(payload, config, logger) {
-  await request(config.discord.webhookUrl, {
+async function sendDiscordAlert(payload, channelConfig, logger) {
+  const mentionEveryone = channelConfig.mentionEveryone === true;
+
+  await request(channelConfig.webhookUrl, {
     method: "POST",
     body: {
-      username: config.discord.username,
-      avatar_url: config.discord.avatarUrl,
+      username: channelConfig.username,
+      avatar_url: channelConfig.avatarUrl,
+      content: buildDiscordMessageContent(channelConfig, mentionEveryone),
       allowed_mentions: {
-        parse: []
+        parse: mentionEveryone ? ["everyone"] : []
       },
-      embeds: [
-        {
-          color: toDiscordColor(payload.streamer.accentColor),
-          author: {
-            name: `${payload.streamer.displayName} on Twitch`,
-            url: payload.stream.channelUrl,
-            icon_url: payload.streamer.profileImageUrl || config.discord.avatarUrl
-          },
-          title: `${payload.streamer.displayName} is live`,
-          url: payload.stream.channelUrl,
-          description: `**${truncate(payload.stream.title, 300)}**`,
-          fields: [
-            {
-              name: "Category",
-              value: payload.stream.gameName,
-              inline: true
-            },
-            {
-              name: "Started",
-              value: formatLocalDateTime(payload.stream.startedAt, payload.app.timeZone),
-              inline: true
-            },
-            {
-              name: "Channel",
-              value: `[Open Twitch](${payload.stream.channelUrl})`,
-              inline: true
-            }
-          ],
-          thumbnail: payload.streamer.profileImageUrl
-            ? {
-                url: payload.streamer.profileImageUrl
-              }
-            : undefined,
-          image: payload.stream.thumbnailUrl
-            ? {
-                url: payload.stream.thumbnailUrl
-              }
-            : undefined,
-          footer: {
-            text: `${payload.app.name} - live alert`
-          },
-          timestamp: payload.stream.startedAt
-        }
-      ]
+      embeds: buildDiscordEmbeds(payload, channelConfig)
     },
-    timeoutMs: config.app.requestTimeoutMs,
-    retries: config.app.maxRetries,
+    timeoutMs: channelConfig.requestTimeoutMs,
+    retries: channelConfig.maxRetries,
     retryLabel: "Discord webhook",
     logger
   });
+}
+
+function buildDiscordMessageContent(channelConfig, mentionEveryone) {
+  return mentionEveryone ? "@everyone" : undefined;
+}
+
+function buildDiscordEmbeds(payload, channelConfig) {
+  const startedAtLabel = formatLocalDateTime(payload.stream.startedAt, payload.app.timeZone);
+
+  if (channelConfig.variant === "test") {
+    return buildTestDiscordEmbeds(payload, channelConfig, startedAtLabel);
+  }
+
+  return [buildDefaultDiscordEmbed(payload, channelConfig, startedAtLabel)];
+}
+
+function buildDefaultDiscordEmbed(payload, channelConfig, startedAtLabel) {
+  return {
+    color: toDiscordColor(payload.streamer.accentColor),
+    author: {
+      name: `${payload.streamer.displayName} • Twitch`,
+      url: payload.stream.channelUrl,
+      icon_url: payload.streamer.profileImageUrl || channelConfig.avatarUrl
+    },
+    title: `🔴 ${payload.streamer.displayName} вышел в эфир`,
+    url: payload.stream.channelUrl,
+    description: `**${truncate(payload.stream.title, 300)}**`,
+    fields: [
+      {
+        name: "Категория",
+        value: payload.stream.gameName,
+        inline: true
+      },
+      {
+        name: "Начало",
+        value: startedAtLabel,
+        inline: true
+      },
+      {
+        name: "Ссылка",
+        value: `[Открыть Twitch](${payload.stream.channelUrl})`,
+        inline: true
+      }
+    ],
+    thumbnail: payload.streamer.profileImageUrl
+      ? {
+          url: payload.streamer.profileImageUrl
+        }
+      : undefined,
+    image: payload.stream.thumbnailUrl
+      ? {
+          url: payload.stream.thumbnailUrl
+        }
+      : undefined,
+    footer: {
+      text: `${payload.app.name} • уведомление о стриме`
+    },
+    timestamp: payload.stream.startedAt
+  };
+}
+
+function buildTestDiscordEmbeds(payload, channelConfig, startedAtLabel) {
+  const previewImageUrl = channelConfig.gifUrl || payload.stream.thumbnailUrl;
+
+  return [
+    {
+      color: toDiscordColor(payload.streamer.accentColor, 0xe11d48),
+      author: {
+        name: `${payload.streamer.displayName} • тестовый канал`,
+        url: payload.stream.channelUrl,
+        icon_url: payload.streamer.profileImageUrl || channelConfig.avatarUrl
+      },
+      title: `Сейчас в эфире: ${payload.streamer.displayName}`,
+      url: payload.stream.channelUrl,
+      description: [
+        `> ${truncate(payload.stream.title, 220)}`,
+        "",
+        "Тестовая копия боевого уведомления отправлена в отдельный канал.",
+        "",
+        `[Смотреть на Twitch](${payload.stream.channelUrl})`
+      ].join("\n"),
+      fields: [
+        {
+          name: "Категория",
+          value: payload.stream.gameName,
+          inline: true
+        },
+        {
+          name: "Начало",
+          value: startedAtLabel,
+          inline: true
+        },
+        {
+          name: "Статус",
+          value: "Тест • @everyone",
+          inline: true
+        }
+      ],
+      image: previewImageUrl
+        ? {
+            url: previewImageUrl
+          }
+        : undefined,
+      footer: {
+        text: `${payload.app.name} • тестовый прогон`
+      },
+      timestamp: payload.stream.startedAt
+    }
+  ];
 }
 
 function escapeHtml(value) {

@@ -109,6 +109,12 @@ const streamersConfigPath = path.resolve(
 );
 
 function loadConfig() {
+  const defaultDiscordUsername = "Twitch Live Alerts";
+  const defaultDiscordAvatarUrl =
+    "https://static.twitchcdn.net/assets/favicon-32-e29e246c157142c94346.png";
+  const defaultTestDiscordUsername = `${readString("DISCORD_USERNAME", defaultDiscordUsername)} ТЕСТ`;
+  const defaultTestDiscordAvatarUrl = readString("DISCORD_AVATAR_URL", defaultDiscordAvatarUrl);
+
   const config = {
     rootDir,
     app: {
@@ -140,11 +146,24 @@ function loadConfig() {
     discord: {
       enabled: readBoolean("ENABLE_DISCORD", false),
       webhookUrl: readString("DISCORD_WEBHOOK_URL"),
-      username: readString("DISCORD_USERNAME", "Twitch Live Alerts"),
-      avatarUrl: readString(
-        "DISCORD_AVATAR_URL",
-        "https://static.twitchcdn.net/assets/favicon-32-e29e246c157142c94346.png"
-      )
+      mentionEveryone: readBoolean("DISCORD_MENTION_EVERYONE", false),
+      username: readString("DISCORD_USERNAME", defaultDiscordUsername),
+      avatarUrl: readString("DISCORD_AVATAR_URL", defaultDiscordAvatarUrl),
+      footerLabel: "live alert",
+      variant: "default"
+    },
+    discordTest: {
+      enabled: Boolean(readString("DISCORD_TEST_WEBHOOK_URL")),
+      webhookUrl: readString("DISCORD_TEST_WEBHOOK_URL"),
+      mentionEveryone: readBoolean("DISCORD_TEST_MENTION_EVERYONE", false),
+      username: readString("DISCORD_TEST_USERNAME", defaultTestDiscordUsername),
+      avatarUrl: readString("DISCORD_TEST_AVATAR_URL", defaultTestDiscordAvatarUrl),
+      gifUrl: readString(
+        "DISCORD_TEST_GIF_URL",
+        "https://media1.giphy.com/media/v1.Y2lkPTc5MGI3NjExcjRlYWN6aXZsYnZycTdnN2M4bGI3OXd2c2NkNmltNmpvc2F2Y3F4NyZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9Zw/HSyR7A954pdC4w6PHa/giphy.gif"
+      ),
+      footerLabel: readString("DISCORD_TEST_FOOTER_LABEL", "тестовое уведомление"),
+      variant: "test"
     }
   };
 
@@ -165,6 +184,10 @@ function validateConfig(config) {
 
   if (config.discord.enabled && !config.discord.webhookUrl) {
     throw new Error("DISCORD_WEBHOOK_URL is required when ENABLE_DISCORD=true.");
+  }
+
+  if (config.discordTest.enabled && !config.discordTest.webhookUrl) {
+    throw new Error("DISCORD_TEST_WEBHOOK_URL is required when the test Discord mirror is enabled.");
   }
 
   fs.mkdirSync(path.dirname(config.app.logFile), { recursive: true });

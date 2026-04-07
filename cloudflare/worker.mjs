@@ -683,9 +683,11 @@ async function handleDiscordFeedbackModalSubmit(interaction, config, logger) {
     return interactionMessage("Нужно описать жалобу, идею или проблему.");
   }
 
+  const feedbackContext = await resolveDiscordFeedbackContext(interaction, config, logger);
+
   await sendDiscordMessage(
     createDiscordBotChannelConfig(config.discordTest, feedbackChannelId),
-    buildDiscordFeedbackMessage(interaction, subject, messageText, config),
+    buildDiscordFeedbackMessage(interaction, subject, messageText, config, feedbackContext),
     logger
   );
 
@@ -1005,15 +1007,87 @@ function formatDiscordTestGuildStreamers(streamers) {
   return lines.join("\n");
 }
 
-function buildDiscordFeedbackMessage(interaction, subject, messageText, config) {
+async function resolveDiscordFeedbackContext(interaction, config, logger) {
   const guildId = readString(interaction.guild_id);
   const channelId = normalizeDiscordChannelId(interaction.channel_id);
+  const context = {
+    guildId,
+    guildName: readString(
+      interaction.guild && interaction.guild.name,
+      guildId ? `Сервер ${guildId}` : "Личные сообщения"
+    ),
+    channelId,
+    inviteUrl: ""
+  };
+
+  if (!guildId || !config.discordTest.botToken) {
+    return context;
+  }
+
+  try {
+    const guild = await requestDiscordBotApi(
+      config,
+      `https://discord.com/api/v10/guilds/${guildId}`,
+      {
+        method: "GET",
+        retryLabel: "Discord feedback guild lookup"
+      },
+      logger
+    );
+    const guildName = readString(guild && guild.name);
+    if (guildName) {
+      context.guildName = guildName;
+    }
+  } catch (error) {
+    logger.warn("Failed to resolve Discord guild name for feedback.", {
+      guildId,
+      error: error.message
+    });
+  }
+
+  if (!channelId) {
+    return context;
+  }
+
+  try {
+    const invite = await requestDiscordBotApi(
+      config,
+      `https://discord.com/api/v10/channels/${channelId}/invites`,
+      {
+        method: "POST",
+        body: {
+          max_age: 0,
+          max_uses: 0,
+          temporary: false,
+          unique: false
+        },
+        retryLabel: "Discord feedback invite create"
+      },
+      logger
+    );
+    const inviteCode = readString(invite && invite.code);
+    if (inviteCode) {
+      context.inviteUrl = `https://discord.gg/${inviteCode}`;
+    }
+  } catch (error) {
+    logger.warn("Failed to create Discord invite for feedback source.", {
+      guildId,
+      channelId,
+      error: error.message
+    });
+  }
+
+  return context;
+}
+
+function buildDiscordFeedbackMessage(interaction, subject, messageText, config, feedbackContext = {}) {
+  const guildId = readString(feedbackContext.guildId, readString(interaction.guild_id));
+  const channelId = normalizeDiscordChannelId(feedbackContext.channelId || interaction.channel_id);
   const userId = getInteractionUserId(interaction);
   const userLabel = getInteractionUserLabel(interaction);
-  const guildName = readString(
-    interaction.guild && interaction.guild.name,
-    guildId ? `Сервер ${guildId}` : "Личные сообщения"
-  );
+  const guildName = readString(feedbackContext.guildName, guildId ? `Сервер ${guildId}` : "Личные сообщения");
+  const inviteUrl = readString(feedbackContext.inviteUrl);
+  const guildValue = guildId ? `${guildName}\n\`${guildId}\`` : guildName;
 
   return {
     content: undefined,
@@ -1033,12 +1107,17 @@ function buildDiscordFeedbackMessage(interaction, subject, messageText, config) 
           },
           {
             name: "Сервер",
-            value: guildName,
+            value: guildValue,
             inline: true
           },
           {
             name: "ID канала",
             value: channelId ? `\`${channelId}\`` : "не указан",
+            inline: true
+          },
+          {
+            name: "Инвайт",
+            value: inviteUrl ? `[Открыть сервер](${inviteUrl})` : "не удалось создать",
             inline: true
           },
           {
@@ -2607,20 +2686,40 @@ async function sendDiscordCheckMessage(streamer, channelId, config, logger) {
   await sendDiscordMessage(channelConfig, message, logger);
 }
 
+async function requestDiscordBotApi(config, url, options = {}, logger) {
+  return request(url, {
+    method: options.method || "GET",
+    headers: {
+      Authorization: `Bot ${config.discordTest.botToken}`,
+      ...(options.headers || {})
+    },
+    body: options.body,
+    timeoutMs: config.discordTest.requestTimeoutMs,
+    retries: config.discordTest.maxRetries,
+    retryLabel: options.retryLabel || "Discord bot API",
+    logger
+  });
+}
+
 async function sendDiscordMessage(channelConfig, message, logger) {
 
   if (channelConfig.transport === "bot") {
-    return request(`https://discord.com/api/v10/channels/${channelConfig.channelId}/messages`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bot ${channelConfig.botToken}`
+    return requestDiscordBotApi(
+      {
+        discordTest: {
+          botToken: channelConfig.botToken,
+          requestTimeoutMs: channelConfig.requestTimeoutMs,
+          maxRetries: channelConfig.maxRetries
+        }
       },
-      body: message,
-      timeoutMs: channelConfig.requestTimeoutMs,
-      retries: channelConfig.maxRetries,
-      retryLabel: "Discord bot API",
+      `https://discord.com/api/v10/channels/${channelConfig.channelId}/messages`,
+      {
+        method: "POST",
+        body: message,
+        retryLabel: "Discord bot API"
+      },
       logger
-    });
+    );
   }
 
   return request(channelConfig.webhookUrl, {

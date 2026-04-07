@@ -273,17 +273,23 @@ async function handleDiscordCommandRegistrationRequest(incomingRequest, env) {
       ? `https://discord.com/api/v10/applications/${config.discordBotTestMode.applicationId}/commands`
       : `https://discord.com/api/v10/applications/${config.discordBotTestMode.applicationId}/guilds/${guildId}/commands`;
 
-  const commands = await request(endpoint, {
-    method: "PUT",
-    headers: {
-      Authorization: `Bot ${config.discordTest.botToken}`
-    },
-    body: buildDiscordTestCommands(),
-    timeoutMs: config.app.requestTimeoutMs,
-    retries: config.app.maxRetries,
-    retryLabel: "Discord command registration",
-    logger
-  });
+  let commands;
+  try {
+    commands = await request(endpoint, {
+      method: "PUT",
+      headers: {
+        Authorization: `Bot ${config.discordTest.botToken}`
+      },
+      body: buildDiscordTestCommands(),
+      timeoutMs: config.app.requestTimeoutMs,
+      retries: config.app.maxRetries,
+      retryLabel: "Discord command registration",
+      logger
+    });
+  } catch (error) {
+    logger.error("Discord command registration failed.", error);
+    return jsonErrorResponse(error);
+  }
 
   return jsonResponse({
     ok: true,
@@ -484,10 +490,7 @@ function buildDiscordTestCommands() {
     {
       name: "testbot",
       description: "Открыть тестовое меню настройки Twitch-уведомлений",
-      type: 1,
-      contexts: [0],
-      integration_types: [0],
-      default_member_permissions: String(MANAGE_GUILD_PERMISSION)
+      type: 1
     }
   ];
 }
@@ -2194,6 +2197,23 @@ function jsonResponse(payload, init = {}) {
       "cache-control": "no-store"
     }
   });
+}
+
+function jsonErrorResponse(error, fallbackStatus = 500) {
+  const status =
+    error && Number.isFinite(error.status) && error.status >= 400 && error.status <= 599
+      ? error.status
+      : fallbackStatus;
+
+  return jsonResponse(
+    {
+      ok: false,
+      error: error && error.message ? error.message : "Unknown error.",
+      status,
+      details: error && "body" in error ? error.body : null
+    },
+    { status }
+  );
 }
 
 async function callTelegramApi(method, body, config, logger) {

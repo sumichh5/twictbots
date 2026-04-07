@@ -10,6 +10,7 @@ const DEFAULT_STREAMERS_JSON = JSON.stringify({
 
 const STATE_KEY = "state:v1";
 const DISCORD_TEST_CONFIG_PREFIX = "discord-test-config:v1:";
+const DISCORD_GUILD_OBSERVED_PREFIX = "discord-guild-observed:v1:";
 const LEVELS = {
   debug: 10,
   info: 20,
@@ -375,6 +376,10 @@ async function handleDiscordInteractionRequest(request, env) {
 async function handleDiscordApplicationCommand(interaction, env, config, logger) {
   const commandName = interaction.data && interaction.data.name ? interaction.data.name : "";
 
+  if (interaction.guild_id) {
+    await ensureDiscordGuildObserved(interaction, env, config, logger, commandName);
+  }
+
   if (commandName === "feedback") {
     return interactionResponse({
       type: INTERACTION_RESPONSE_MODAL,
@@ -683,7 +688,7 @@ async function handleDiscordFeedbackModalSubmit(interaction, config, logger) {
     return interactionMessage("Нужно описать жалобу, идею или проблему.");
   }
 
-  const feedbackContext = await resolveDiscordFeedbackContext(interaction, config, logger);
+  const feedbackContext = await resolveDiscordGuildContext(interaction, config, logger);
 
   await sendDiscordMessage(
     createDiscordBotChannelConfig(config.discordTest, feedbackChannelId),
@@ -692,6 +697,40 @@ async function handleDiscordFeedbackModalSubmit(interaction, config, logger) {
   );
 
   return interactionMessage("Сообщение отправлено. Спасибо за фидбек по боту.");
+}
+
+async function ensureDiscordGuildObserved(interaction, env, config, logger, commandName = "") {
+  const guildId = readString(interaction.guild_id);
+  const installLogChannelId = normalizeDiscordChannelId(config.discordBotTestMode.installLogChannelId);
+  const installLogGuildId = readString(config.discordBotTestMode.installLogGuildId);
+  if (!guildId || !installLogChannelId || guildId === installLogGuildId) {
+    return false;
+  }
+
+  const observed = await loadDiscordObservedGuild(env, guildId);
+  if (observed) {
+    return false;
+  }
+
+  const guildContext = await resolveDiscordGuildContext(interaction, config, logger);
+  await sendDiscordMessage(
+    createDiscordBotChannelConfig(config.discordTest, installLogChannelId),
+    buildDiscordGuildObservedMessage(interaction, config, guildContext, commandName),
+    logger
+  );
+
+  await saveDiscordObservedGuild(env, guildId, {
+    guildId,
+    guildName: guildContext.guildName,
+    guildOwnerId: guildContext.guildOwnerId,
+    inviteUrl: guildContext.inviteUrl,
+    observedAt: new Date().toISOString(),
+    observedByUserId: getInteractionUserId(interaction),
+    observedByUserLabel: getInteractionUserLabel(interaction),
+    commandName
+  });
+
+  return true;
 }
 
 async function handleDiscordBroadcastCommand(interaction, env, config, logger) {
@@ -820,17 +859,30 @@ function buildDiscordAddModal(savedConfig, currentChannelId) {
     custom_id: "testbot:add_modal",
     title: "Добавить Twitch-канал",
     components: [
-      buildTextInputRow("streamer_login", "Twitch login или ссылка", "wooflyaa"),
+      buildTextInputRow("streamer_login", "Twitch login или ссылка", "", true, {
+        placeholder: "например: wooflyaa"
+      }),
       buildTextInputRow(
         "channel_id",
         "ID канала Discord (пусто = текущий)",
-        savedConfig && savedConfig.channelId ? savedConfig.channelId : currentChannelId,
-        false
+        "",
+        false,
+        {
+          placeholder: "если пусто, бот возьмёт текущий канал"
+        }
       ),
       buildTextInputRow(
         "mention_everyone",
         "Пинг everyone? yes / no",
-        savedConfig && savedConfig.mentionEveryone ? "yes" : "no"
+        "",
+        false,
+        {
+          placeholder: savedConfig
+            ? `текущее: ${savedConfig.mentionEveryone ? "yes" : "no"}`
+            : currentChannelId
+              ? "yes / no"
+              : "yes / no"
+        }
       )
     ]
   };
@@ -1007,7 +1059,7 @@ function formatDiscordTestGuildStreamers(streamers) {
   return lines.join("\n");
 }
 
-async function resolveDiscordFeedbackContext(interaction, config, logger) {
+async function resolveDiscordGuildContext(interaction, config, logger) {
   const guildId = readString(interaction.guild_id);
   const channelId = normalizeDiscordChannelId(interaction.channel_id);
   const context = {
@@ -1016,6 +1068,7 @@ async function resolveDiscordFeedbackContext(interaction, config, logger) {
       interaction.guild && interaction.guild.name,
       guildId ? `Сервер ${guildId}` : "Личные сообщения"
     ),
+    guildOwnerId: "",
     channelId,
     inviteUrl: ""
   };
@@ -1038,6 +1091,7 @@ async function resolveDiscordFeedbackContext(interaction, config, logger) {
     if (guildName) {
       context.guildName = guildName;
     }
+    context.guildOwnerId = readString(guild && guild.owner_id);
   } catch (error) {
     logger.warn("Failed to resolve Discord guild name for feedback.", {
       guildId,
@@ -1135,6 +1189,66 @@ function buildDiscordFeedbackMessage(interaction, subject, messageText, config, 
   };
 }
 
+function buildDiscordGuildObservedMessage(interaction, config, guildContext, commandName = "") {
+  const guildId = readString(guildContext.guildId);
+  const channelId = normalizeDiscordChannelId(guildContext.channelId);
+  const guildName = readString(guildContext.guildName, guildId ? `Сервер ${guildId}` : "Неизвестный сервер");
+  const guildOwnerId = readString(guildContext.guildOwnerId, "не удалось определить");
+  const inviteUrl = readString(guildContext.inviteUrl);
+  const userId = getInteractionUserId(interaction);
+  const userLabel = getInteractionUserLabel(interaction);
+  const commandLabel = readString(commandName) ? `/${readString(commandName)}` : "неизвестно";
+
+  return {
+    content: undefined,
+    allowed_mentions: {
+      parse: []
+    },
+    embeds: [
+      {
+        color: 0x22c55e,
+        title: "Новый сервер активировал бота",
+        fields: [
+          {
+            name: "Сервер",
+            value: guildId ? `${guildName}\n\`${guildId}\`` : guildName,
+            inline: true
+          },
+          {
+            name: "ID канала",
+            value: channelId ? `\`${channelId}\`` : "не указан",
+            inline: true
+          },
+          {
+            name: "Owner ID",
+            value: guildOwnerId ? `\`${guildOwnerId}\`` : "не удалось определить",
+            inline: true
+          },
+          {
+            name: "Кто активировал",
+            value: userId ? `${userLabel} • \`${userId}\`` : userLabel,
+            inline: false
+          },
+          {
+            name: "Команда",
+            value: commandLabel,
+            inline: true
+          },
+          {
+            name: "Инвайт",
+            value: inviteUrl ? `[Открыть сервер](${inviteUrl})` : "не удалось создать",
+            inline: true
+          }
+        ],
+        footer: {
+          text: `${config.app.name} • серверный лог`
+        },
+        timestamp: new Date().toISOString()
+      }
+    ]
+  };
+}
+
 function buildDiscordBroadcastMessage(text, config) {
   const createdAt = new Date().toISOString();
 
@@ -1197,6 +1311,10 @@ function getDiscordTestGuildConfigKey(guildId) {
   return `${DISCORD_TEST_CONFIG_PREFIX}${guildId}`;
 }
 
+function getDiscordObservedGuildKey(guildId) {
+  return `${DISCORD_GUILD_OBSERVED_PREFIX}${guildId}`;
+}
+
 async function loadDiscordTestGuildConfig(env, guildId) {
   if (!env.STATE_KV || !guildId) {
     return null;
@@ -1206,8 +1324,24 @@ async function loadDiscordTestGuildConfig(env, guildId) {
   return normalizeDiscordTestGuildConfig(stored);
 }
 
+async function loadDiscordObservedGuild(env, guildId) {
+  if (!env.STATE_KV || !guildId) {
+    return null;
+  }
+
+  return env.STATE_KV.get(getDiscordObservedGuildKey(guildId), { type: "json" });
+}
+
 async function saveDiscordTestGuildConfig(env, guildId, config) {
   await env.STATE_KV.put(getDiscordTestGuildConfigKey(guildId), JSON.stringify(config));
+}
+
+async function saveDiscordObservedGuild(env, guildId, value) {
+  if (!env.STATE_KV || !guildId) {
+    return;
+  }
+
+  await env.STATE_KV.put(getDiscordObservedGuildKey(guildId), JSON.stringify(value));
 }
 
 async function deleteDiscordTestGuildConfig(env, guildId) {
@@ -1519,6 +1653,8 @@ function loadConfig(env, options = {}) {
     ownerUserIds: parseCsv(env.DISCORD_OWNER_USER_IDS),
     feedbackGuildId: readString(env.DISCORD_FEEDBACK_GUILD_ID, readString(env.DISCORD_TEST_GUILD_ID)),
     feedbackChannelId: readString(env.DISCORD_FEEDBACK_CHANNEL_ID),
+    installLogGuildId: readString(env.DISCORD_INSTALL_LOG_GUILD_ID, readString(env.DISCORD_TEST_GUILD_ID)),
+    installLogChannelId: readString(env.DISCORD_INSTALL_LOG_CHANNEL_ID),
     smsAutoReactions: parseCsv(env.DISCORD_SMS_AUTO_REACTIONS, "✅,💬,📌")
   };
 

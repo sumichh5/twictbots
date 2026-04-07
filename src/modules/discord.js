@@ -123,25 +123,55 @@ class DiscordNotifier {
     return mentionEveryone ? "@everyone" : undefined;
   }
 
-  async sendLiveAlert(payload) {
-    const mentionEveryone = this.config.mentionEveryone === true;
+  buildMessage(payload, mentionEveryone) {
+    return {
+      content: this.buildMessageContent(mentionEveryone),
+      allowed_mentions: {
+        parse: mentionEveryone ? ["everyone"] : []
+      },
+      embeds: this.buildEmbeds(payload)
+    };
+  }
 
+  async sendViaWebhook(message) {
     await request(this.config.webhookUrl, {
       method: "POST",
       body: {
         username: this.config.username,
         avatar_url: this.config.avatarUrl,
-        content: this.buildMessageContent(mentionEveryone),
-        allowed_mentions: {
-          parse: mentionEveryone ? ["everyone"] : []
-        },
-        embeds: this.buildEmbeds(payload)
+        ...message
       },
       timeoutMs: this.config.requestTimeoutMs,
       retries: this.config.maxRetries,
       retryLabel: "Discord webhook",
       logger: this.logger
     });
+  }
+
+  async sendViaBot(message) {
+    await request(`https://discord.com/api/v10/channels/${this.config.channelId}/messages`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bot ${this.config.botToken}`
+      },
+      body: message,
+      timeoutMs: this.config.requestTimeoutMs,
+      retries: this.config.maxRetries,
+      retryLabel: "Discord bot API",
+      logger: this.logger
+    });
+  }
+
+  async sendLiveAlert(payload) {
+    const mentionEveryone = this.config.mentionEveryone === true;
+    const message = this.buildMessage(payload, mentionEveryone);
+
+    if (this.config.transport === "bot") {
+      await this.sendViaBot(message);
+      return;
+    }
+
+    await this.sendViaWebhook(message);
   }
 }
 

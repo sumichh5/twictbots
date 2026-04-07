@@ -14,7 +14,7 @@ class NotificationDispatcher {
     if (enabled.length === 0) {
       if (!this.warnedNoChannels) {
         this.logger.warn(
-          "No delivery channels enabled. Configure Telegram, Discord, or DISCORD_TEST_WEBHOOK_URL."
+          "No delivery channels enabled. Configure Telegram, Discord webhook/bot, or the test Discord mirror."
         );
         this.warnedNoChannels = true;
       }

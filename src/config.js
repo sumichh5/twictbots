@@ -112,6 +112,16 @@ function loadConfig() {
   const defaultDiscordUsername = "Twitch Live Alerts";
   const defaultDiscordAvatarUrl =
     "https://static.twitchcdn.net/assets/favicon-32-e29e246c157142c94346.png";
+  const discordRequested = readBoolean("ENABLE_DISCORD", false);
+  const discordWebhookUrl = readString("DISCORD_WEBHOOK_URL");
+  const discordBotToken = readString("DISCORD_BOT_TOKEN");
+  const discordChannelId = readString("DISCORD_CHANNEL_ID");
+  const discordTransport = discordBotToken && discordChannelId ? "bot" : discordWebhookUrl ? "webhook" : "none";
+  const discordTestWebhookUrl = readString("DISCORD_TEST_WEBHOOK_URL");
+  const discordTestBotToken = readString("DISCORD_TEST_BOT_TOKEN", discordBotToken);
+  const discordTestChannelId = readString("DISCORD_TEST_CHANNEL_ID");
+  const discordTestTransport =
+    discordTestBotToken && discordTestChannelId ? "bot" : discordTestWebhookUrl ? "webhook" : "none";
   const defaultTestDiscordUsername = `${readString("DISCORD_USERNAME", defaultDiscordUsername)} ТЕСТ`;
   const defaultTestDiscordAvatarUrl = readString("DISCORD_AVATAR_URL", defaultDiscordAvatarUrl);
 
@@ -144,8 +154,11 @@ function loadConfig() {
       chatId: readString("TELEGRAM_CHAT_ID")
     },
     discord: {
-      enabled: readBoolean("ENABLE_DISCORD", false),
-      webhookUrl: readString("DISCORD_WEBHOOK_URL"),
+      enabled: discordRequested && discordTransport !== "none",
+      transport: discordTransport,
+      webhookUrl: discordWebhookUrl,
+      botToken: discordBotToken,
+      channelId: discordChannelId,
       mentionEveryone: readBoolean("DISCORD_MENTION_EVERYONE", false),
       username: readString("DISCORD_USERNAME", defaultDiscordUsername),
       avatarUrl: readString("DISCORD_AVATAR_URL", defaultDiscordAvatarUrl),
@@ -153,8 +166,11 @@ function loadConfig() {
       variant: "default"
     },
     discordTest: {
-      enabled: Boolean(readString("DISCORD_TEST_WEBHOOK_URL")),
-      webhookUrl: readString("DISCORD_TEST_WEBHOOK_URL"),
+      enabled: discordTestTransport !== "none",
+      transport: discordTestTransport,
+      webhookUrl: discordTestWebhookUrl,
+      botToken: discordTestBotToken,
+      channelId: discordTestChannelId,
       mentionEveryone: readBoolean("DISCORD_TEST_MENTION_EVERYONE", false),
       username: readString("DISCORD_TEST_USERNAME", defaultTestDiscordUsername),
       avatarUrl: readString("DISCORD_TEST_AVATAR_URL", defaultTestDiscordAvatarUrl),
@@ -174,6 +190,11 @@ function loadConfig() {
 }
 
 function validateConfig(config) {
+  const discordRequested = readBoolean("ENABLE_DISCORD", false);
+  const discordTestRequested = Boolean(
+    readString("DISCORD_TEST_WEBHOOK_URL") || readString("DISCORD_TEST_BOT_TOKEN") || readString("DISCORD_TEST_CHANNEL_ID")
+  );
+
   if (!config.app.mockMode && (!config.twitch.clientId || !config.twitch.clientSecret)) {
     throw new Error("TWITCH_CLIENT_ID and TWITCH_CLIENT_SECRET are required when MOCK_MODE=false.");
   }
@@ -182,12 +203,14 @@ function validateConfig(config) {
     throw new Error("TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are required when ENABLE_TELEGRAM=true.");
   }
 
-  if (config.discord.enabled && !config.discord.webhookUrl) {
-    throw new Error("DISCORD_WEBHOOK_URL is required when ENABLE_DISCORD=true.");
+  if (discordRequested && !config.discord.enabled) {
+    throw new Error("DISCORD_WEBHOOK_URL or DISCORD_BOT_TOKEN + DISCORD_CHANNEL_ID is required when ENABLE_DISCORD=true.");
   }
 
-  if (config.discordTest.enabled && !config.discordTest.webhookUrl) {
-    throw new Error("DISCORD_TEST_WEBHOOK_URL is required when the test Discord mirror is enabled.");
+  if (discordTestRequested && !config.discordTest.enabled) {
+    throw new Error(
+      "DISCORD_TEST_WEBHOOK_URL or DISCORD_TEST_BOT_TOKEN/DISCORD_BOT_TOKEN + DISCORD_TEST_CHANNEL_ID is required when the test Discord mirror is enabled."
+    );
   }
 
   fs.mkdirSync(path.dirname(config.app.logFile), { recursive: true });

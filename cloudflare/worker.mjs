@@ -182,6 +182,10 @@ function summarizeConfiguration(env) {
         discord: config.discord.enabled,
         discordTest: config.discordTest.enabled
       },
+      transports: {
+        discord: config.discord.enabled ? config.discord.transport : "disabled",
+        discordTest: config.discordTest.enabled ? config.discordTest.transport : "disabled"
+      },
       stateKvBound: Boolean(env.STATE_KV),
       missing: config.missing
     };
@@ -194,6 +198,10 @@ function summarizeConfiguration(env) {
         telegram: false,
         discord: false,
         discordTest: false
+      },
+      transports: {
+        discord: "disabled",
+        discordTest: "disabled"
       },
       stateKvBound: Boolean(env.STATE_KV),
       missing: [error.message]
@@ -221,6 +229,18 @@ function loadConfig(env, options = {}) {
 
   const telegramRequested = readBoolean(env.ENABLE_TELEGRAM, true);
   const discordRequested = readBoolean(env.ENABLE_DISCORD, true);
+  const discordWebhookUrl = readString(env.DISCORD_WEBHOOK_URL);
+  const discordBotToken = readString(env.DISCORD_BOT_TOKEN);
+  const discordChannelId = readString(env.DISCORD_CHANNEL_ID);
+  const discordTransport = discordBotToken && discordChannelId ? "bot" : discordWebhookUrl ? "webhook" : "none";
+  const discordTestWebhookUrl = readString(env.DISCORD_TEST_WEBHOOK_URL);
+  const discordTestBotToken = readString(env.DISCORD_TEST_BOT_TOKEN, discordBotToken);
+  const discordTestChannelId = readString(env.DISCORD_TEST_CHANNEL_ID);
+  const discordTestTransport =
+    discordTestBotToken && discordTestChannelId ? "bot" : discordTestWebhookUrl ? "webhook" : "none";
+  const discordTestRequested = Boolean(
+    discordTestWebhookUrl || readString(env.DISCORD_TEST_BOT_TOKEN) || discordTestChannelId
+  );
 
   const telegram = {
     enabled: telegramRequested && Boolean(readString(env.TELEGRAM_BOT_TOKEN) && readString(env.TELEGRAM_CHAT_ID)),
@@ -229,8 +249,11 @@ function loadConfig(env, options = {}) {
   };
 
   const discord = {
-    enabled: discordRequested && Boolean(readString(env.DISCORD_WEBHOOK_URL)),
-    webhookUrl: readString(env.DISCORD_WEBHOOK_URL),
+    enabled: discordRequested && discordTransport !== "none",
+    transport: discordTransport,
+    webhookUrl: discordWebhookUrl,
+    botToken: discordBotToken,
+    channelId: discordChannelId,
     mentionEveryone: readBoolean(env.DISCORD_MENTION_EVERYONE, false),
     username: readString(env.DISCORD_USERNAME, defaultDiscordUsername),
     avatarUrl: readString(env.DISCORD_AVATAR_URL, defaultDiscordAvatarUrl),
@@ -241,8 +264,11 @@ function loadConfig(env, options = {}) {
   };
 
   const discordTest = {
-    enabled: Boolean(readString(env.DISCORD_TEST_WEBHOOK_URL)),
-    webhookUrl: readString(env.DISCORD_TEST_WEBHOOK_URL),
+    enabled: discordTestTransport !== "none",
+    transport: discordTestTransport,
+    webhookUrl: discordTestWebhookUrl,
+    botToken: discordTestBotToken,
+    channelId: discordTestChannelId,
     mentionEveryone: readBoolean(env.DISCORD_TEST_MENTION_EVERYONE, false),
     username: readString(
       env.DISCORD_TEST_USERNAME,
@@ -271,6 +297,12 @@ function loadConfig(env, options = {}) {
   }
   if (streamers.length === 0) {
     missing.push("STREAMERS_JSON");
+  }
+  if (discordRequested && !discord.enabled) {
+    missing.push("DISCORD_WEBHOOK_URL or DISCORD_BOT_TOKEN + DISCORD_CHANNEL_ID");
+  }
+  if (discordTestRequested && !discordTest.enabled) {
+    missing.push("DISCORD_TEST_WEBHOOK_URL or DISCORD_TEST_BOT_TOKEN/DISCORD_BOT_TOKEN + DISCORD_TEST_CHANNEL_ID");
   }
 
   if (strict && missing.length > 0) {
@@ -1014,7 +1046,7 @@ async function dispatchLiveAlert(payload, state, config, logger) {
   if (channels.length === 0) {
     if (!warnedNoChannels) {
       warnedNoChannels = true;
-      logger.warn("No delivery channels enabled. Configure Telegram, Discord, or test Discord secrets.");
+      logger.warn("No delivery channels enabled. Configure Telegram, Discord webhook/bot, or the test Discord mirror.");
     }
     return [];
   }
@@ -1108,23 +1140,46 @@ async function sendTelegramAlert(payload, config, logger) {
 
 async function sendDiscordAlert(payload, channelConfig, logger) {
   const mentionEveryone = channelConfig.mentionEveryone === true;
+  const message = buildDiscordMessage(payload, channelConfig, mentionEveryone);
+
+  if (channelConfig.transport === "bot") {
+    await request(`https://discord.com/api/v10/channels/${channelConfig.channelId}/messages`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bot ${channelConfig.botToken}`
+      },
+      body: message,
+      timeoutMs: channelConfig.requestTimeoutMs,
+      retries: channelConfig.maxRetries,
+      retryLabel: "Discord bot API",
+      logger
+    });
+
+    return;
+  }
 
   await request(channelConfig.webhookUrl, {
     method: "POST",
     body: {
       username: channelConfig.username,
       avatar_url: channelConfig.avatarUrl,
-      content: buildDiscordMessageContent(channelConfig, mentionEveryone),
-      allowed_mentions: {
-        parse: mentionEveryone ? ["everyone"] : []
-      },
-      embeds: buildDiscordEmbeds(payload, channelConfig)
+      ...message
     },
     timeoutMs: channelConfig.requestTimeoutMs,
     retries: channelConfig.maxRetries,
     retryLabel: "Discord webhook",
     logger
   });
+}
+
+function buildDiscordMessage(payload, channelConfig, mentionEveryone) {
+  return {
+    content: buildDiscordMessageContent(channelConfig, mentionEveryone),
+    allowed_mentions: {
+      parse: mentionEveryone ? ["everyone"] : []
+    },
+    embeds: buildDiscordEmbeds(payload, channelConfig)
+  };
 }
 
 function buildDiscordMessageContent(channelConfig, mentionEveryone) {

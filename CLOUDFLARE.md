@@ -27,10 +27,22 @@ Add these as Worker secrets:
 - `TELEGRAM_BOT_TOKEN`
 - `TELEGRAM_CHAT_ID`
 - `DISCORD_WEBHOOK_URL`
+- `DISCORD_BOT_TOKEN`
+- `TEST_TRIGGER_TOKEN`
 
 Optional Worker vars:
 
 - `DISCORD_MENTION_EVERYONE=true` to ping `@everyone` in Discord alerts.
+- `DISCORD_CHANNEL_ID=<discord text channel id>` to send main alerts as your bot.
+- `DISCORD_TEST_CHANNEL_ID=<discord text channel id>` to send test alerts as your bot.
+- `DISCORD_TEST_GIF_URL=<gif url>` to keep the test preview image.
+
+Discord delivery now supports two modes:
+
+- `DISCORD_WEBHOOK_URL` for classic webhook delivery.
+- `DISCORD_BOT_TOKEN` + channel ID for sending as your real Discord bot.
+
+If both are present, the Worker prefers bot mode.
 
 If you only want one channel, either:
 

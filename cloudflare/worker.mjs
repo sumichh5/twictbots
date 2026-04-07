@@ -281,7 +281,11 @@ async function handleDiscordCommandRegistrationRequest(incomingRequest, env) {
       headers: {
         Authorization: `Bot ${config.discordTest.botToken}`
       },
-      body: buildDiscordTestCommands(),
+      body: buildDiscordTestCommands({
+        scope,
+        guildId,
+        managementGuildId: config.discordBotTestMode.feedbackGuildId || config.discordBotTestMode.testGuildId
+      }),
       timeoutMs: config.app.requestTimeoutMs,
       retries: config.app.maxRetries,
       retryLabel: "Discord command registration",
@@ -371,6 +375,13 @@ async function handleDiscordInteractionRequest(request, env) {
 async function handleDiscordApplicationCommand(interaction, env, config, logger) {
   const commandName = interaction.data && interaction.data.name ? interaction.data.name : "";
 
+  if (commandName === "feedback") {
+    return interactionResponse({
+      type: INTERACTION_RESPONSE_MODAL,
+      data: buildDiscordFeedbackModal()
+    });
+  }
+
   if (commandName === "testbot") {
     if (!interaction.guild_id) {
       return interactionMessage("Тестовое меню доступно только внутри сервера Discord.");
@@ -392,6 +403,10 @@ async function handleDiscordApplicationCommand(interaction, env, config, logger)
 
   if (commandName === "testcheck") {
     return handleDiscordTestCheckCommand(interaction, env, config, logger);
+  }
+
+  if (commandName === "sms") {
+    return handleDiscordBroadcastCommand(interaction, env, config, logger);
   }
 
   return interactionMessage("Неизвестная тестовая команда.");
@@ -442,6 +457,11 @@ async function handleDiscordMessageComponent(interaction, env, config) {
 }
 
 async function handleDiscordModalSubmit(interaction, env, config, logger) {
+  const customId = String(interaction.data && interaction.data.custom_id ? interaction.data.custom_id : "");
+  if (customId === "feedback:modal") {
+    return handleDiscordFeedbackModalSubmit(interaction, config, logger);
+  }
+
   if (!interaction.guild_id) {
     return interactionMessage("Тестовая настройка доступна только внутри сервера Discord.");
   }
@@ -450,7 +470,6 @@ async function handleDiscordModalSubmit(interaction, env, config, logger) {
     return interactionMessage("Для настройки нужен доступ Manage Server или Administrator.");
   }
 
-  const customId = String(interaction.data && interaction.data.custom_id ? interaction.data.custom_id : "");
   if (customId !== "testbot:add_modal" && customId !== "testbot:remove_modal") {
     return interactionMessage("Неизвестная форма настройки.");
   }
@@ -534,8 +553,16 @@ async function handleDiscordModalSubmit(interaction, env, config, logger) {
   });
 }
 
-function buildDiscordTestCommands() {
-  return [
+function buildDiscordTestCommands(options = {}) {
+  const scope = readString(options.scope, "guild");
+  const guildId = readString(options.guildId);
+  const managementGuildId = readString(options.managementGuildId);
+  const commands = [
+    {
+      name: "feedback",
+      description: "Отправить жалобу, баг или предложение по боту",
+      type: 1
+    },
     {
       name: "testbot",
       description: "Открыть тестовое меню настройки Twitch-уведомлений",
@@ -557,6 +584,25 @@ function buildDiscordTestCommands() {
       ]
     }
   ];
+
+  if (scope === "guild" && guildId && managementGuildId && guildId === managementGuildId) {
+    commands.push({
+      name: "sms",
+      description: "Разослать сообщение от имени бота по всем Discord-каналам",
+      type: 1,
+      default_member_permissions: String(MANAGE_GUILD_PERMISSION),
+      options: [
+        {
+          type: APPLICATION_COMMAND_OPTION_TYPE_STRING,
+          name: "text",
+          description: "Текст сообщения для рассылки",
+          required: true
+        }
+      ]
+    });
+  }
+
+  return commands;
 }
 
 async function handleDiscordTestCheckCommand(interaction, env, config, logger) {
@@ -620,6 +666,98 @@ async function handleDiscordTestCheckCommand(interaction, env, config, logger) {
     data: {
       flags: EPHEMERAL_FLAG,
       content: `Проверочное сообщение отправлено в <#${targetChannelId}>. Стример найден: **${resolvedStreamer.displayName}**, но сейчас он **оффлайн**.`
+    }
+  });
+}
+
+async function handleDiscordFeedbackModalSubmit(interaction, config, logger) {
+  const feedbackChannelId = normalizeDiscordChannelId(config.discordBotTestMode.feedbackChannelId);
+  if (!feedbackChannelId) {
+    return interactionMessage("Канал для обратной связи пока не настроен.");
+  }
+
+  const values = readDiscordModalValues(interaction);
+  const subject = truncate(readString(values.feedback_subject, "Без темы"), 120);
+  const messageText = truncate(readString(values.feedback_message), 1800);
+  if (!messageText) {
+    return interactionMessage("Нужно описать жалобу, идею или проблему.");
+  }
+
+  await sendDiscordMessage(
+    createDiscordBotChannelConfig(config.discordTest, feedbackChannelId),
+    buildDiscordFeedbackMessage(interaction, subject, messageText, config),
+    logger
+  );
+
+  return interactionMessage("Сообщение отправлено. Спасибо за фидбек по боту.");
+}
+
+async function handleDiscordBroadcastCommand(interaction, env, config, logger) {
+  if (!interaction.guild_id) {
+    return interactionMessage("Команду /sms можно запускать только внутри Discord-сервера.");
+  }
+
+  if (!config.discordBotTestMode.ownerUserIds.length) {
+    return interactionMessage("DISCORD_OWNER_USER_IDS пока не настроен. Добавь туда свой Discord user id.");
+  }
+
+  if (!isDiscordBotOwner(interaction, config)) {
+    return interactionMessage("Команда /sms доступна только владельцу бота.");
+  }
+
+  const managementGuildId = readString(
+    config.discordBotTestMode.feedbackGuildId,
+    config.discordBotTestMode.testGuildId
+  );
+  if (managementGuildId && interaction.guild_id !== managementGuildId) {
+    return interactionMessage("Команду /sms можно запускать только на служебном сервере бота.");
+  }
+
+  const text = truncate(getDiscordCommandStringOption(interaction, "text"), 3500);
+  if (!text) {
+    return interactionMessage("Нужно указать текст рассылки.");
+  }
+
+  const guildConfigs = await loadDiscordTestGuildConfigs(env);
+  const targets = collectDiscordBroadcastTargets(guildConfigs);
+  if (targets.length === 0) {
+    return interactionMessage("Пока нет сохранённых Discord-каналов для рассылки.");
+  }
+
+  const message = buildDiscordBroadcastMessage(text, config);
+  let delivered = 0;
+  let failed = 0;
+
+  for (const target of targets) {
+    try {
+      const sentMessage = await sendDiscordMessage(
+        createDiscordBotChannelConfig(config.discordTest, target.channelId),
+        message,
+        logger
+      );
+      await addDiscordMessageAutoReactions(
+        createDiscordBotChannelConfig(config.discordTest, target.channelId),
+        target.channelId,
+        sentMessage && sentMessage.id ? sentMessage.id : "",
+        config.discordBotTestMode.smsAutoReactions,
+        logger
+      );
+      delivered += 1;
+    } catch (error) {
+      failed += 1;
+      logger.error("Failed to deliver /sms broadcast.", {
+        guildId: target.guildId,
+        channelId: target.channelId,
+        error: error.message
+      });
+    }
+  }
+
+  return interactionResponse({
+    type: INTERACTION_RESPONSE_CHANNEL_MESSAGE_WITH_SOURCE,
+    data: {
+      flags: EPHEMERAL_FLAG,
+      content: `Рассылка завершена. Успешно: **${delivered}**, с ошибкой: **${failed}**.`
     }
   });
 }
@@ -702,6 +840,24 @@ function buildDiscordAddModal(savedConfig, currentChannelId) {
   };
 }
 
+function buildDiscordFeedbackModal() {
+  return {
+    custom_id: "feedback:modal",
+    title: "Жалоба или предложение",
+    components: [
+      buildTextInputRow("feedback_subject", "Тема", "", true, {
+        maxLength: 120,
+        placeholder: "Например: баг с настройкой канала"
+      }),
+      buildTextInputRow("feedback_message", "Опиши, что случилось или что хочется добавить", "", true, {
+        style: 2,
+        maxLength: 1800,
+        placeholder: "Подробно опиши жалобу, идею, баг или предложение"
+      })
+    ]
+  };
+}
+
 function buildDiscordRemoveModal(savedConfig) {
   const firstStreamer = savedConfig && savedConfig.streamers.length > 0 ? savedConfig.streamers[0].login : "";
 
@@ -723,7 +879,9 @@ function buildButton(customId, label, style) {
   };
 }
 
-function buildTextInputRow(customId, label, value, required = true) {
+function buildTextInputRow(customId, label, value, required = true, options = {}) {
+  const textValue = readString(value);
+  const maxLength = Number.isFinite(options.maxLength) ? options.maxLength : 100;
   return {
     type: COMPONENT_TYPE_ACTION_ROW,
     components: [
@@ -731,10 +889,11 @@ function buildTextInputRow(customId, label, value, required = true) {
         type: COMPONENT_TYPE_TEXT_INPUT,
         custom_id: customId,
         label,
-        style: 1,
+        style: options.style === 2 ? 2 : 1,
         required,
-        value: String(value || "").slice(0, 100),
-        max_length: 100
+        value: textValue ? textValue.slice(0, maxLength) : undefined,
+        placeholder: options.placeholder ? String(options.placeholder).slice(0, 100) : undefined,
+        max_length: maxLength
       }
     ]
   };
@@ -763,6 +922,11 @@ function interactionResponse(payload, status = 200) {
 function memberHasGuildSetupPermission(interaction) {
   const permissions = BigInt(readString(interaction.member && interaction.member.permissions, "0"));
   return (permissions & ADMINISTRATOR_PERMISSION) !== 0n || (permissions & MANAGE_GUILD_PERMISSION) !== 0n;
+}
+
+function isDiscordBotOwner(interaction, config) {
+  const userId = getInteractionUserId(interaction);
+  return Boolean(userId) && config.discordBotTestMode.ownerUserIds.includes(userId);
 }
 
 function readDiscordModalValues(interaction) {
@@ -813,6 +977,21 @@ function getInteractionUserId(interaction) {
   );
 }
 
+function getInteractionUserLabel(interaction) {
+  const user =
+    interaction && interaction.member && interaction.member.user
+      ? interaction.member.user
+      : interaction && interaction.user
+        ? interaction.user
+        : null;
+
+  if (!user) {
+    return "неизвестный пользователь";
+  }
+
+  return readString(user.global_name, readString(user.username, "неизвестный пользователь"));
+}
+
 function getDiscordCommandStringOption(interaction, optionName) {
   const options = Array.isArray(interaction.data && interaction.data.options) ? interaction.data.options : [];
   const option = options.find((entry) => entry && entry.name === optionName);
@@ -830,6 +1009,83 @@ function formatDiscordTestGuildStreamers(streamers) {
   }
 
   return lines.join("\n");
+}
+
+function buildDiscordFeedbackMessage(interaction, subject, messageText, config) {
+  const guildId = readString(interaction.guild_id);
+  const channelId = normalizeDiscordChannelId(interaction.channel_id);
+  const userId = getInteractionUserId(interaction);
+  const userLabel = getInteractionUserLabel(interaction);
+  const guildName = readString(
+    interaction.guild && interaction.guild.name,
+    guildId ? `Сервер ${guildId}` : "Личные сообщения"
+  );
+
+  return {
+    content: undefined,
+    allowed_mentions: {
+      parse: []
+    },
+    embeds: [
+      {
+        color: 0xf59e0b,
+        title: "Новое обращение по боту",
+        description: truncate(messageText, 1800),
+        fields: [
+          {
+            name: "Тема",
+            value: subject || "Без темы",
+            inline: false
+          },
+          {
+            name: "Сервер",
+            value: guildName,
+            inline: true
+          },
+          {
+            name: "ID канала",
+            value: channelId ? `\`${channelId}\`` : "не указан",
+            inline: true
+          },
+          {
+            name: "Пользователь",
+            value: userId ? `${userLabel} • \`${userId}\`` : userLabel,
+            inline: false
+          }
+        ],
+        footer: {
+          text: `${config.app.name} • feedback`
+        },
+        timestamp: new Date().toISOString()
+      }
+    ]
+  };
+}
+
+function buildDiscordBroadcastMessage(text, config) {
+  const createdAt = new Date().toISOString();
+
+  return {
+    content: undefined,
+    allowed_mentions: {
+      parse: []
+    },
+    embeds: [
+      {
+        color: 0x5865f2,
+        author: {
+          name: "Сообщение от разработчика",
+          icon_url: config.discordTest.avatarUrl
+        },
+        title: "Обновление бота",
+        description: truncate(text, 3500),
+        footer: {
+          text: `${config.app.name} • системное сообщение`
+        },
+        timestamp: createdAt
+      }
+    ]
+  };
 }
 
 async function verifyDiscordInteractionSignature(rawBody, signature, timestamp, publicKey) {
@@ -889,7 +1145,7 @@ async function deleteDiscordTestGuildConfig(env, guildId) {
   await env.STATE_KV.delete(getDiscordTestGuildConfigKey(guildId));
 }
 
-async function loadDiscordTestSubscriptions(env) {
+async function loadDiscordTestGuildConfigs(env) {
   if (!env.STATE_KV) {
     return [];
   }
@@ -907,7 +1163,7 @@ async function loadDiscordTestSubscriptions(env) {
       const config = await env.STATE_KV.get(entry.name, { type: "json" });
       const normalized = normalizeDiscordTestGuildConfig(config);
       if (normalized) {
-        result.push(...expandDiscordTestGuildConfig(normalized));
+        result.push(normalized);
       }
     }
 
@@ -915,6 +1171,11 @@ async function loadDiscordTestSubscriptions(env) {
   } while (cursor);
 
   return result;
+}
+
+async function loadDiscordTestSubscriptions(env) {
+  const guildConfigs = await loadDiscordTestGuildConfigs(env);
+  return guildConfigs.flatMap((config) => expandDiscordTestGuildConfig(config));
 }
 
 function normalizeDiscordTestGuildConfig(value) {
@@ -982,6 +1243,31 @@ function expandDiscordTestGuildConfig(config) {
     updatedAt: config.updatedAt,
     updatedByUserId: config.updatedByUserId
   }));
+}
+
+function collectDiscordBroadcastTargets(guildConfigs) {
+  const seen = new Set();
+  const result = [];
+
+  for (const config of guildConfigs) {
+    if (!config || !config.guildId || !config.channelId) {
+      continue;
+    }
+
+    const key = `${config.guildId}:${config.channelId}`;
+    if (seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+    result.push({
+      guildId: config.guildId,
+      guildName: config.guildName,
+      channelId: config.channelId
+    });
+  }
+
+  return result;
 }
 
 function upsertDiscordTestGuildConfig(existingConfig, input) {
@@ -1156,7 +1442,11 @@ function loadConfig(env, options = {}) {
     enabled: readBoolean(env.ENABLE_DISCORD_BOT_TEST_MODE, false),
     applicationId: readString(env.DISCORD_APPLICATION_ID),
     publicKey: readString(env.DISCORD_PUBLIC_KEY),
-    testGuildId: readString(env.DISCORD_TEST_GUILD_ID)
+    testGuildId: readString(env.DISCORD_TEST_GUILD_ID),
+    ownerUserIds: parseCsv(env.DISCORD_OWNER_USER_IDS),
+    feedbackGuildId: readString(env.DISCORD_FEEDBACK_GUILD_ID, readString(env.DISCORD_TEST_GUILD_ID)),
+    feedbackChannelId: readString(env.DISCORD_FEEDBACK_CHANNEL_ID),
+    smsAutoReactions: parseCsv(env.DISCORD_SMS_AUTO_REACTIONS, "✅,💬,📌")
   };
 
   const telegram = {
@@ -1474,6 +1764,18 @@ function readBoolean(value, fallback = false) {
   }
 
   return ["1", "true", "yes", "on"].includes(raw);
+}
+
+function parseCsv(value, fallback = "") {
+  const raw = readString(value, fallback);
+  if (!raw) {
+    return [];
+  }
+
+  return raw
+    .split(",")
+    .map((entry) => readString(entry))
+    .filter(Boolean);
 }
 
 function createLogger(env) {
@@ -2049,14 +2351,20 @@ function createDiscordTestSubscriptionChannelConfig(config, subscription) {
   };
 }
 
-function createDiscordTestManualCheckChannelConfig(config, channelId) {
+function createDiscordBotChannelConfig(baseChannelConfig, channelId, options = {}) {
   return {
-    ...config.discordTest,
+    ...baseChannelConfig,
     enabled: true,
     transport: "bot",
     channelId,
-    mentionEveryone: false
+    mentionEveryone: options.mentionEveryone === true
   };
+}
+
+function createDiscordTestManualCheckChannelConfig(config, channelId) {
+  return createDiscordBotChannelConfig(config.discordTest, channelId, {
+    mentionEveryone: false
+  });
 }
 
 async function resolveSingleLiveStream(streamer, config, logger) {
@@ -2311,7 +2619,7 @@ async function sendDiscordCheckMessage(streamer, channelId, config, logger) {
 async function sendDiscordMessage(channelConfig, message, logger) {
 
   if (channelConfig.transport === "bot") {
-    await request(`https://discord.com/api/v10/channels/${channelConfig.channelId}/messages`, {
+    return request(`https://discord.com/api/v10/channels/${channelConfig.channelId}/messages`, {
       method: "POST",
       headers: {
         Authorization: `Bot ${channelConfig.botToken}`
@@ -2322,11 +2630,9 @@ async function sendDiscordMessage(channelConfig, message, logger) {
       retryLabel: "Discord bot API",
       logger
     });
-
-    return;
   }
 
-  await request(channelConfig.webhookUrl, {
+  return request(channelConfig.webhookUrl, {
     method: "POST",
     body: {
       username: channelConfig.username,
@@ -2336,8 +2642,55 @@ async function sendDiscordMessage(channelConfig, message, logger) {
     timeoutMs: channelConfig.requestTimeoutMs,
     retries: channelConfig.maxRetries,
     retryLabel: "Discord webhook",
-    logger
-  });
+      logger
+    });
+}
+
+async function addDiscordMessageAutoReactions(channelConfig, channelId, messageId, emojis, logger) {
+  if (channelConfig.transport !== "bot" || !channelConfig.botToken || !channelId || !messageId) {
+    return;
+  }
+
+  for (const emoji of emojis) {
+    const encodedEmoji = encodeDiscordReaction(emoji);
+    if (!encodedEmoji) {
+      continue;
+    }
+
+    try {
+      await request(`https://discord.com/api/v10/channels/${channelId}/messages/${messageId}/reactions/${encodedEmoji}/@me`, {
+        method: "PUT",
+        headers: {
+          Authorization: `Bot ${channelConfig.botToken}`
+        },
+        timeoutMs: channelConfig.requestTimeoutMs,
+        retries: channelConfig.maxRetries,
+        retryLabel: "Discord bot reaction",
+        logger
+      });
+    } catch (error) {
+      logger.warn("Failed to add auto-reaction to /sms message.", {
+        channelId,
+        messageId,
+        emoji,
+        error: error.message
+      });
+    }
+  }
+}
+
+function encodeDiscordReaction(value) {
+  const raw = readString(value);
+  if (!raw) {
+    return "";
+  }
+
+  const customEmojiMatch = raw.match(/^<a?:([a-zA-Z0-9_]+):(\d+)>$/);
+  if (customEmojiMatch) {
+    return encodeURIComponent(`${customEmojiMatch[1]}:${customEmojiMatch[2]}`);
+  }
+
+  return encodeURIComponent(raw);
 }
 
 function buildDiscordMessage(payload, channelConfig, mentionEveryone) {

@@ -27,6 +27,10 @@ DISCORD_TEST_USERNAME = "Wooflyaa ТЕСТ"
 DISCORD_TEST_GIF_URL = "https://media1.giphy.com/media/v1.Y2lkPTc5MGI3NjExcjRlYWN6aXZsYnZycTdnN2M4bGI3OXd2c2NkNmltNmpvc2F2Y3F4NyZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9Zw/HSyR7A954pdC4w6PHa/giphy.gif"
 DISCORD_TEST_FOOTER_LABEL = "тестовое уведомление"
 DISCORD_TEST_CHANNEL_ID = "1490423155024597143"
+DISCORD_FEEDBACK_GUILD_ID = "1487715231672045720"
+DISCORD_FEEDBACK_CHANNEL_ID = "1491176670948757674"
+DISCORD_SMS_AUTO_REACTIONS = "✅,💬,📌"
+# DISCORD_OWNER_USER_IDS = "your_discord_user_id"
 STREAMERS_JSON = """{"streamers":[{"url":"https://www.twitch.tv/Wooflyaa","label":"Wooflyaa","accentColor":"#E11D48"}]}"""
 
 # Cloudflare can now auto-provision KV bindings during deploys from Wrangler

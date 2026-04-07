@@ -72,7 +72,7 @@ class DiscordNotifier {
   }
 
   buildTestEmbed(payload, startedAtLabel) {
-    const previewImageUrl = this.config.gifUrl || payload.stream.thumbnailUrl;
+    const previewImageUrl = payload.stream.thumbnailUrl || this.config.gifUrl;
 
     return {
       color: toDiscordColor(payload.streamer.accentColor, 0xe11d48),

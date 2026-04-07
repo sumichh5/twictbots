@@ -409,10 +409,17 @@ async function handleDiscordMessageComponent(interaction, env, config) {
   const customId = String(interaction.data && interaction.data.custom_id ? interaction.data.custom_id : "");
   const existingConfig = await loadDiscordTestGuildConfig(env, interaction.guild_id);
 
-  if (customId === "testbot:open_setup") {
+  if (customId === "testbot:open_add") {
     return interactionResponse({
       type: INTERACTION_RESPONSE_MODAL,
-      data: buildDiscordSetupModal(existingConfig, interaction.channel_id)
+      data: buildDiscordAddModal(existingConfig, interaction.channel_id)
+    });
+  }
+
+  if (customId === "testbot:open_remove") {
+    return interactionResponse({
+      type: INTERACTION_RESPONSE_MODAL,
+      data: buildDiscordRemoveModal(existingConfig)
     });
   }
 
@@ -444,49 +451,84 @@ async function handleDiscordModalSubmit(interaction, env, config, logger) {
   }
 
   const customId = String(interaction.data && interaction.data.custom_id ? interaction.data.custom_id : "");
-  if (customId !== "testbot:setup_modal") {
+  if (customId !== "testbot:add_modal" && customId !== "testbot:remove_modal") {
     return interactionMessage("Неизвестная форма настройки.");
   }
 
+  const existingConfig = await loadDiscordTestGuildConfig(env, interaction.guild_id);
   const values = readDiscordModalValues(interaction);
+  if (customId === "testbot:add_modal") {
+    const streamerInput = extractTwitchLogin(values.streamer_login);
+    const mentionEveryone = parseYesNo(
+      values.mention_everyone,
+      existingConfig ? existingConfig.mentionEveryone : config.discordTest.mentionEveryone
+    );
+    const channelId = normalizeDiscordChannelId(values.channel_id) || interaction.channel_id;
+
+    if (!streamerInput) {
+      return interactionMessage("Нужно указать Twitch login или ссылку на канал.");
+    }
+
+    if (!normalizeDiscordChannelId(channelId)) {
+      return interactionMessage("ID Discord-канала выглядит неверно.");
+    }
+
+    const resolvedStreamer = await resolveSingleStreamer(streamerInput, config, logger);
+    if (!resolvedStreamer) {
+      return interactionMessage("Не смог найти такой Twitch-канал. Проверь login и попробуй снова.");
+    }
+
+    const savedConfig = upsertDiscordTestGuildConfig(existingConfig, {
+      guildId: interaction.guild_id,
+      guildName: interaction.guild && interaction.guild.name ? interaction.guild.name : "",
+      channelId,
+      mentionEveryone,
+      streamer: {
+        login: resolvedStreamer.login,
+        displayName: resolvedStreamer.displayName
+      },
+      updatedByUserId: getInteractionUserId(interaction)
+    });
+
+    await saveDiscordTestGuildConfig(env, interaction.guild_id, savedConfig);
+
+    return interactionResponse({
+      type: INTERACTION_RESPONSE_CHANNEL_MESSAGE_WITH_SOURCE,
+      data: {
+        flags: EPHEMERAL_FLAG,
+        ...buildDiscordTestMenuData(
+          savedConfig,
+          channelId,
+          `Сохранено: ${resolvedStreamer.displayName} добавлен в список сервера. Всего стримеров: ${savedConfig.streamers.length}.`
+        )
+      }
+    });
+  }
+
   const streamerInput = extractTwitchLogin(values.streamer_login);
-  const mentionEveryone = parseYesNo(values.mention_everyone, config.discordTest.mentionEveryone);
-  const channelId = normalizeDiscordChannelId(values.channel_id) || interaction.channel_id;
-
   if (!streamerInput) {
-    return interactionMessage("Нужно указать Twitch login или ссылку на канал.");
+    return interactionMessage("Укажи Twitch login стримера, которого нужно удалить.");
   }
 
-  if (!normalizeDiscordChannelId(channelId)) {
-    return interactionMessage("ID Discord-канала выглядит неверно.");
+  if (!existingConfig || existingConfig.streamers.length === 0) {
+    return interactionMessage("На сервере пока нет сохранённых стримеров.");
   }
 
-  const resolvedStreamer = await resolveSingleStreamer(streamerInput, config, logger);
-  if (!resolvedStreamer) {
-    return interactionMessage("Не смог найти такой Twitch-канал. Проверь login и попробуй снова.");
+  const updatedConfig = removeStreamerFromDiscordTestGuildConfig(existingConfig, streamerInput, getInteractionUserId(interaction));
+  if (!updatedConfig.removed) {
+    return interactionMessage(`Стример \`${streamerInput}\` не найден в настройке этого сервера.`);
   }
 
-  const savedConfig = {
-    guildId: interaction.guild_id,
-    guildName: interaction.guild && interaction.guild.name ? interaction.guild.name : "",
-    channelId,
-    streamerLogin: resolvedStreamer.login,
-    streamerDisplayName: resolvedStreamer.displayName,
-    mentionEveryone,
-    updatedAt: new Date().toISOString(),
-    updatedByUserId: getInteractionUserId(interaction)
-  };
-
-  await saveDiscordTestGuildConfig(env, interaction.guild_id, savedConfig);
+  await saveDiscordTestGuildConfig(env, interaction.guild_id, updatedConfig.config);
 
   return interactionResponse({
     type: INTERACTION_RESPONSE_CHANNEL_MESSAGE_WITH_SOURCE,
     data: {
       flags: EPHEMERAL_FLAG,
       ...buildDiscordTestMenuData(
-        savedConfig,
-        channelId,
-        `Сохранено: отслеживаем ${resolvedStreamer.displayName} и шлём уведомления в <#${channelId}>.`
+        updatedConfig.config,
+        updatedConfig.config.channelId || interaction.channel_id,
+        `Удалено: ${updatedConfig.removed.displayName || updatedConfig.removed.login}. Осталось стримеров: ${updatedConfig.config.streamers.length}.`
       )
     }
   });
@@ -528,9 +570,14 @@ async function handleDiscordTestCheckCommand(interaction, env, config, logger) {
 
   const savedConfig = await loadDiscordTestGuildConfig(env, interaction.guild_id);
   const providedLogin = extractTwitchLogin(getDiscordCommandStringOption(interaction, "streamer"));
-  const login = providedLogin || (savedConfig ? savedConfig.streamerLogin : "");
+  const configuredStreamers = savedConfig ? savedConfig.streamers : [];
+  const login = providedLogin || (configuredStreamers.length === 1 ? configuredStreamers[0].login : "");
 
   if (!login) {
+    if (configuredStreamers.length > 1) {
+      return interactionMessage("У сервера несколько стримеров. Укажи `streamer` прямо в `/testcheck`.");
+    }
+
     return interactionMessage("Сначала настрой `/testbot`, либо укажи `streamer` прямо в `/testcheck`.");
   }
 
@@ -579,7 +626,8 @@ async function handleDiscordTestCheckCommand(interaction, env, config, logger) {
 
 function buildDiscordTestMenuData(savedConfig, currentChannelId, notice = "") {
   const activeChannelId = savedConfig && savedConfig.channelId ? savedConfig.channelId : currentChannelId;
-  const isConfigured = Boolean(savedConfig);
+  const streamers = savedConfig ? savedConfig.streamers : [];
+  const isConfigured = Boolean(savedConfig) && streamers.length > 0;
 
   return {
     embeds: [
@@ -594,8 +642,8 @@ function buildDiscordTestMenuData(savedConfig, currentChannelId, notice = "") {
             inline: true
           },
           {
-            name: "Twitch",
-            value: isConfigured ? `\`${savedConfig.streamerLogin}\`` : "ещё не настроен",
+            name: "Стримеров",
+            value: String(streamers.length || 0),
             inline: true
           },
           {
@@ -605,12 +653,17 @@ function buildDiscordTestMenuData(savedConfig, currentChannelId, notice = "") {
           },
           {
             name: "Пинг",
-            value: isConfigured ? (savedConfig.mentionEveryone ? "@everyone" : "без пинга") : "по умолчанию",
+            value: savedConfig ? (savedConfig.mentionEveryone ? "@everyone" : "без пинга") : "по умолчанию",
             inline: true
+          },
+          {
+            name: "Список Twitch",
+            value: formatDiscordTestGuildStreamers(streamers),
+            inline: false
           }
         ],
         footer: {
-          text: isConfigured ? `Обновлено: ${formatLocalDateTime(savedConfig.updatedAt, "Europe/Kiev")}` : "Конфиг для сервера ещё не сохранён"
+          text: savedConfig ? `Обновлено: ${formatLocalDateTime(savedConfig.updatedAt, "Europe/Kiev")}` : "Конфиг для сервера ещё не сохранён"
         }
       }
     ],
@@ -618,21 +671,22 @@ function buildDiscordTestMenuData(savedConfig, currentChannelId, notice = "") {
       {
         type: COMPONENT_TYPE_ACTION_ROW,
         components: [
-          buildButton("testbot:open_setup", "Настроить", BUTTON_STYLE_PRIMARY),
+          buildButton("testbot:open_add", "Добавить", BUTTON_STYLE_PRIMARY),
+          buildButton("testbot:open_remove", "Удалить", BUTTON_STYLE_SECONDARY),
           buildButton("testbot:show_status", "Статус", BUTTON_STYLE_SECONDARY),
-          buildButton("testbot:disable", "Отключить", BUTTON_STYLE_DANGER)
+          buildButton("testbot:disable", "Сброс", BUTTON_STYLE_DANGER)
         ]
       }
     ]
   };
 }
 
-function buildDiscordSetupModal(savedConfig, currentChannelId) {
+function buildDiscordAddModal(savedConfig, currentChannelId) {
   return {
-    custom_id: "testbot:setup_modal",
-    title: "Настройка Twitch TEST",
+    custom_id: "testbot:add_modal",
+    title: "Добавить Twitch в TEST",
     components: [
-      buildTextInputRow("streamer_login", "Twitch login или ссылка", savedConfig ? savedConfig.streamerLogin : "wooflyaa"),
+      buildTextInputRow("streamer_login", "Twitch login или ссылка", "wooflyaa"),
       buildTextInputRow(
         "channel_id",
         "ID канала Discord (пусто = текущий)",
@@ -644,6 +698,18 @@ function buildDiscordSetupModal(savedConfig, currentChannelId) {
         "Пинг everyone? yes / no",
         savedConfig && savedConfig.mentionEveryone ? "yes" : "no"
       )
+    ]
+  };
+}
+
+function buildDiscordRemoveModal(savedConfig) {
+  const firstStreamer = savedConfig && savedConfig.streamers.length > 0 ? savedConfig.streamers[0].login : "";
+
+  return {
+    custom_id: "testbot:remove_modal",
+    title: "Удалить Twitch из TEST",
+    components: [
+      buildTextInputRow("streamer_login", "Twitch login для удаления", firstStreamer)
     ]
   };
 }
@@ -753,6 +819,19 @@ function getDiscordCommandStringOption(interaction, optionName) {
   return readString(option && option.value);
 }
 
+function formatDiscordTestGuildStreamers(streamers) {
+  if (!Array.isArray(streamers) || streamers.length === 0) {
+    return "ещё не добавлены";
+  }
+
+  const lines = streamers.slice(0, 8).map((streamer, index) => `${index + 1}. \`${streamer.login}\``);
+  if (streamers.length > 8) {
+    lines.push(`и ещё ${streamers.length - 8}`);
+  }
+
+  return lines.join("\n");
+}
+
 async function verifyDiscordInteractionSignature(rawBody, signature, timestamp, publicKey) {
   const signatureHex = readString(signature);
   const timestampValue = readString(timestamp);
@@ -795,7 +874,7 @@ async function loadDiscordTestGuildConfig(env, guildId) {
   }
 
   const stored = await env.STATE_KV.get(getDiscordTestGuildConfigKey(guildId), { type: "json" });
-  return normalizeDiscordTestSubscriptionRecord(stored);
+  return normalizeDiscordTestGuildConfig(stored);
 }
 
 async function saveDiscordTestGuildConfig(env, guildId, config) {
@@ -826,9 +905,9 @@ async function loadDiscordTestSubscriptions(env) {
 
     for (const entry of page.keys) {
       const config = await env.STATE_KV.get(entry.name, { type: "json" });
-      const normalized = normalizeDiscordTestSubscriptionRecord(config);
+      const normalized = normalizeDiscordTestGuildConfig(config);
       if (normalized) {
-        result.push(normalized);
+        result.push(...expandDiscordTestGuildConfig(normalized));
       }
     }
 
@@ -838,27 +917,129 @@ async function loadDiscordTestSubscriptions(env) {
   return result;
 }
 
-function normalizeDiscordTestSubscriptionRecord(value) {
+function normalizeDiscordTestGuildConfig(value) {
   if (!value || typeof value !== "object") {
     return null;
   }
 
   const guildId = readString(value.guildId);
   const channelId = normalizeDiscordChannelId(value.channelId);
-  const streamerLogin = extractTwitchLogin(value.streamerLogin);
-  if (!guildId || !channelId || !streamerLogin) {
+  if (!guildId || !channelId) {
     return null;
+  }
+
+  const seen = new Set();
+  const streamers = [];
+
+  if (Array.isArray(value.streamers)) {
+    for (const item of value.streamers) {
+      const login = extractTwitchLogin(item && item.login);
+      if (!login || seen.has(login)) {
+        continue;
+      }
+
+      seen.add(login);
+      streamers.push({
+        login,
+        displayName: readString(item && item.displayName, login),
+        addedAt: readString(item && item.addedAt, readString(value.updatedAt)),
+        addedByUserId: readString(item && item.addedByUserId, readString(value.updatedByUserId))
+      });
+    }
+  }
+
+  if (streamers.length === 0) {
+    const legacyLogin = extractTwitchLogin(value.streamerLogin);
+    if (legacyLogin) {
+      streamers.push({
+        login: legacyLogin,
+        displayName: readString(value.streamerDisplayName, legacyLogin),
+        addedAt: readString(value.updatedAt),
+        addedByUserId: readString(value.updatedByUserId)
+      });
+    }
   }
 
   return {
     guildId,
     guildName: readString(value.guildName),
     channelId,
-    streamerLogin,
-    streamerDisplayName: readString(value.streamerDisplayName, streamerLogin),
+    streamers,
     mentionEveryone: Boolean(value.mentionEveryone),
     updatedAt: readString(value.updatedAt),
     updatedByUserId: readString(value.updatedByUserId)
+  };
+}
+
+function expandDiscordTestGuildConfig(config) {
+  return config.streamers.map((streamer) => ({
+    guildId: config.guildId,
+    guildName: config.guildName,
+    channelId: config.channelId,
+    streamerLogin: streamer.login,
+    streamerDisplayName: streamer.displayName || streamer.login,
+    mentionEveryone: config.mentionEveryone,
+    updatedAt: config.updatedAt,
+    updatedByUserId: config.updatedByUserId
+  }));
+}
+
+function upsertDiscordTestGuildConfig(existingConfig, input) {
+  const now = new Date().toISOString();
+  const streamers = existingConfig ? existingConfig.streamers.slice() : [];
+  const login = input.streamer.login;
+  const existingIndex = streamers.findIndex((item) => item.login === login);
+  const nextStreamer = {
+    login,
+    displayName: input.streamer.displayName || login,
+    addedAt: existingIndex >= 0 ? streamers[existingIndex].addedAt : now,
+    addedByUserId: existingIndex >= 0 ? streamers[existingIndex].addedByUserId : input.updatedByUserId
+  };
+
+  if (existingIndex >= 0) {
+    streamers[existingIndex] = nextStreamer;
+  } else {
+    streamers.push(nextStreamer);
+  }
+
+  streamers.sort((left, right) => left.login.localeCompare(right.login));
+
+  return {
+    guildId: input.guildId,
+    guildName: input.guildName || (existingConfig ? existingConfig.guildName : ""),
+    channelId: input.channelId || (existingConfig ? existingConfig.channelId : ""),
+    streamers,
+    mentionEveryone: input.mentionEveryone,
+    updatedAt: now,
+    updatedByUserId: input.updatedByUserId
+  };
+}
+
+function removeStreamerFromDiscordTestGuildConfig(existingConfig, login, updatedByUserId) {
+  const normalizedLogin = extractTwitchLogin(login);
+  if (!existingConfig || !normalizedLogin) {
+    return {
+      config: existingConfig,
+      removed: null
+    };
+  }
+
+  const removed = existingConfig.streamers.find((item) => item.login === normalizedLogin) || null;
+  if (!removed) {
+    return {
+      config: existingConfig,
+      removed: null
+    };
+  }
+
+  return {
+    removed,
+    config: {
+      ...existingConfig,
+      streamers: existingConfig.streamers.filter((item) => item.login !== normalizedLogin),
+      updatedAt: new Date().toISOString(),
+      updatedByUserId
+    }
   };
 }
 

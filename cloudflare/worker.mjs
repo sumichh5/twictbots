@@ -382,9 +382,9 @@ async function handleDiscordApplicationCommand(interaction, env, config, logger)
     });
   }
 
-  if (commandName === "testbot") {
+  if (commandName === "testbot" || commandName === "streambot") {
     if (!interaction.guild_id) {
-      return interactionMessage("Тестовое меню доступно только внутри сервера Discord.");
+      return interactionMessage("Меню настройки доступно только внутри сервера Discord.");
     }
 
     if (!memberHasGuildSetupPermission(interaction)) {
@@ -396,12 +396,12 @@ async function handleDiscordApplicationCommand(interaction, env, config, logger)
       type: INTERACTION_RESPONSE_CHANNEL_MESSAGE_WITH_SOURCE,
       data: {
         flags: EPHEMERAL_FLAG,
-        ...buildDiscordTestMenuData(existingConfig, interaction.channel_id, "Тестовый режим настройки открыт.")
+        ...buildDiscordTestMenuData(existingConfig, interaction.channel_id, "Меню настройки открыто.")
       }
     });
   }
 
-  if (commandName === "testcheck") {
+  if (commandName === "testcheck" || commandName === "streamcheck") {
     return handleDiscordTestCheckCommand(interaction, env, config, logger);
   }
 
@@ -409,12 +409,12 @@ async function handleDiscordApplicationCommand(interaction, env, config, logger)
     return handleDiscordBroadcastCommand(interaction, env, config, logger);
   }
 
-  return interactionMessage("Неизвестная тестовая команда.");
+  return interactionMessage("Неизвестная команда бота.");
 }
 
 async function handleDiscordMessageComponent(interaction, env, config) {
   if (!interaction.guild_id) {
-    return interactionMessage("Тестовое меню доступно только внутри сервера Discord.");
+    return interactionMessage("Меню настройки доступно только внутри сервера Discord.");
   }
 
   if (!memberHasGuildSetupPermission(interaction)) {
@@ -449,11 +449,11 @@ async function handleDiscordMessageComponent(interaction, env, config) {
     await deleteDiscordTestGuildConfig(env, interaction.guild_id);
     return interactionResponse({
       type: INTERACTION_RESPONSE_UPDATE_MESSAGE,
-      data: buildDiscordTestMenuData(null, interaction.channel_id, "Тестовая настройка для этого сервера отключена.")
+      data: buildDiscordTestMenuData(null, interaction.channel_id, "Настройка для этого сервера отключена.")
     });
   }
 
-  return interactionMessage("Неизвестная кнопка в тестовом меню.");
+  return interactionMessage("Неизвестная кнопка меню.");
 }
 
 async function handleDiscordModalSubmit(interaction, env, config, logger) {
@@ -463,7 +463,7 @@ async function handleDiscordModalSubmit(interaction, env, config, logger) {
   }
 
   if (!interaction.guild_id) {
-    return interactionMessage("Тестовая настройка доступна только внутри сервера Discord.");
+    return interactionMessage("Настройка доступна только внутри сервера Discord.");
   }
 
   if (!memberHasGuildSetupPermission(interaction)) {
@@ -564,14 +564,14 @@ function buildDiscordTestCommands(options = {}) {
       type: 1
     },
     {
-      name: "testbot",
-      description: "Открыть тестовое меню настройки Twitch-уведомлений",
+      name: "streambot",
+      description: "Открыть меню настройки Twitch-уведомлений",
       type: 1,
       default_member_permissions: String(MANAGE_GUILD_PERMISSION)
     },
     {
-      name: "testcheck",
-      description: "Проверить Twitch-канал и отправить тестовое сообщение",
+      name: "streamcheck",
+      description: "Проверить Twitch-канал и отправить сообщение проверки",
       type: 1,
       default_member_permissions: String(MANAGE_GUILD_PERMISSION),
       options: [
@@ -621,10 +621,10 @@ async function handleDiscordTestCheckCommand(interaction, env, config, logger) {
 
   if (!login) {
     if (configuredStreamers.length > 1) {
-      return interactionMessage("У сервера несколько стримеров. Укажи `streamer` прямо в `/testcheck`.");
+      return interactionMessage("У сервера несколько стримеров. Укажи `streamer` прямо в `/streamcheck`.");
     }
 
-    return interactionMessage("Сначала настрой `/testbot`, либо укажи `streamer` прямо в `/testcheck`.");
+    return interactionMessage("Сначала настрой `/streambot`, либо укажи `streamer` прямо в `/streamcheck`.");
   }
 
   const resolvedStreamer = await resolveSingleStreamer(login, config, logger);
@@ -644,7 +644,7 @@ async function handleDiscordTestCheckCommand(interaction, env, config, logger) {
       type: INTERACTION_RESPONSE_CHANNEL_MESSAGE_WITH_SOURCE,
       data: {
         flags: EPHEMERAL_FLAG,
-        content: `Тест отправлен в <#${targetChannelId}>. Стример найден: **${resolvedStreamer.displayName}**, статус: **онлайн**. Скрин взят из текущего стрима.`
+        content: `Проверка отправлена в <#${targetChannelId}>. Стример найден: **${resolvedStreamer.displayName}**, статус: **онлайн**. Скрин взят из текущего стрима.`
       }
     });
   }
@@ -765,20 +765,14 @@ async function handleDiscordBroadcastCommand(interaction, env, config, logger) {
 function buildDiscordTestMenuData(savedConfig, currentChannelId, notice = "") {
   const activeChannelId = savedConfig && savedConfig.channelId ? savedConfig.channelId : currentChannelId;
   const streamers = savedConfig ? savedConfig.streamers : [];
-  const isConfigured = Boolean(savedConfig) && streamers.length > 0;
 
   return {
     embeds: [
       {
         color: 0xe11d48,
-        title: "Тестовое меню Twitch-бота",
-        description: notice || "Через это меню можно сохранить тестовую настройку сервера без влияния на основной прод-поток.",
+        title: "Настройки Twitch-бота",
+        description: notice || "Здесь настраиваются стримеры, канал уведомлений и пинг для этого сервера.",
         fields: [
-          {
-            name: "Режим",
-            value: "Только TEST",
-            inline: true
-          },
           {
             name: "Стримеров",
             value: String(streamers.length || 0),
@@ -822,7 +816,7 @@ function buildDiscordTestMenuData(savedConfig, currentChannelId, notice = "") {
 function buildDiscordAddModal(savedConfig, currentChannelId) {
   return {
     custom_id: "testbot:add_modal",
-    title: "Добавить Twitch в TEST",
+    title: "Добавить Twitch-канал",
     components: [
       buildTextInputRow("streamer_login", "Twitch login или ссылка", "wooflyaa"),
       buildTextInputRow(
@@ -863,7 +857,7 @@ function buildDiscordRemoveModal(savedConfig) {
 
   return {
     custom_id: "testbot:remove_modal",
-    title: "Удалить Twitch из TEST",
+    title: "Удалить Twitch-канал",
     components: [
       buildTextInputRow("streamer_login", "Twitch login для удаления", firstStreamer)
     ]
@@ -1385,7 +1379,7 @@ function summarizeConfiguration(env) {
   } catch (error) {
     return {
       ready: false,
-      appName: readString(env.APP_NAME, "Wooflyaa Live Notifier"),
+      appName: readString(env.APP_NAME, "StreamTwitch"),
       streamers: [],
       channels: {
         telegram: false,
@@ -1409,10 +1403,10 @@ function summarizeConfiguration(env) {
 function loadConfig(env, options = {}) {
   const strict = options.strict !== false;
   const streamers = parseStreamers(readString(env.STREAMERS_JSON, DEFAULT_STREAMERS_JSON));
-  const defaultDiscordUsername = "Wooflyaa Live Alerts";
+  const defaultDiscordUsername = "StreamTwitch";
   const defaultDiscordAvatarUrl = "https://static.twitchcdn.net/assets/favicon-32-e29e246c157142c94346.png";
   const app = {
-    name: readString(env.APP_NAME, "Wooflyaa Live Notifier"),
+    name: readString(env.APP_NAME, "StreamTwitch"),
     requestTimeoutMs: readNumber(env.REQUEST_TIMEOUT_MS, 10000),
     maxRetries: readNumber(env.MAX_RETRIES, 2),
     timeZone: readString(env.TIME_ZONE, "Europe/Kiev"),
@@ -1479,7 +1473,7 @@ function loadConfig(env, options = {}) {
     mentionEveryone: readBoolean(env.DISCORD_TEST_MENTION_EVERYONE, false),
     username: readString(
       env.DISCORD_TEST_USERNAME,
-      `${readString(env.DISCORD_USERNAME, defaultDiscordUsername)} ТЕСТ`
+      readString(env.DISCORD_USERNAME, defaultDiscordUsername)
     ),
     avatarUrl: readString(env.DISCORD_TEST_AVATAR_URL, readString(env.DISCORD_AVATAR_URL, defaultDiscordAvatarUrl)),
     gifUrl: readString(
@@ -1488,7 +1482,7 @@ function loadConfig(env, options = {}) {
     ),
     requestTimeoutMs: app.requestTimeoutMs,
     maxRetries: app.maxRetries,
-    footerLabel: readString(env.DISCORD_TEST_FOOTER_LABEL, "тестовое уведомление"),
+    footerLabel: readString(env.DISCORD_TEST_FOOTER_LABEL, "уведомление о стриме"),
     variant: "test"
   };
 
@@ -1611,7 +1605,7 @@ function createManualDiscordTestPayload(config, options = {}) {
     stream: {
       id: `manual-test-${Date.now()}`,
       title: String(options.title || "Проверка оформления уведомления").trim(),
-      gameName: "Тестовый запуск",
+        gameName: "Проверка уведомления",
       startedAt,
       thumbnailUrl: "",
       viewerCount: 1,
@@ -2587,7 +2581,7 @@ async function sendDiscordCheckMessage(streamer, channelId, config, logger) {
       {
         color: 0xe11d48,
         author: {
-          name: `${streamer.displayName} • тестовая проверка`,
+          name: `${streamer.displayName} • проверка канала`,
           url: streamer.channelUrl,
           icon_url: streamer.profileImageUrl || channelConfig.avatarUrl
         },
@@ -2605,9 +2599,6 @@ async function sendDiscordCheckMessage(streamer, channelId, config, logger) {
               url: streamer.profileImageUrl
             }
           : undefined,
-        footer: {
-          text: "Тестовая проверка Discord-бота"
-        },
         timestamp: new Date().toISOString()
       }
     ]
@@ -2711,7 +2702,7 @@ function buildDiscordEmbeds(payload, channelConfig) {
   const startedAtLabel = formatLocalDateTime(payload.stream.startedAt, payload.app.timeZone);
 
   if (channelConfig.variant === "test") {
-    return buildTestDiscordEmbeds(payload, channelConfig, startedAtLabel);
+    return buildPublicDiscordEmbeds(payload, channelConfig, startedAtLabel);
   }
 
   return [buildDefaultDiscordEmbed(payload, channelConfig, startedAtLabel)];
@@ -2762,14 +2753,15 @@ function buildDefaultDiscordEmbed(payload, channelConfig, startedAtLabel) {
   };
 }
 
-function buildTestDiscordEmbeds(payload, channelConfig, startedAtLabel) {
+function buildPublicDiscordEmbeds(payload, channelConfig, startedAtLabel) {
   const previewImageUrl = payload.stream.thumbnailUrl || channelConfig.gifUrl;
+  const mentionLabel = channelConfig.mentionEveryone ? "@everyone" : "без пинга";
 
   return [
     {
       color: toDiscordColor(payload.streamer.accentColor, 0xe11d48),
       author: {
-        name: `${payload.streamer.displayName} • тестовый канал`,
+        name: payload.streamer.displayName,
         url: payload.stream.channelUrl,
         icon_url: payload.streamer.profileImageUrl || channelConfig.avatarUrl
       },
@@ -2777,8 +2769,6 @@ function buildTestDiscordEmbeds(payload, channelConfig, startedAtLabel) {
       url: payload.stream.channelUrl,
       description: [
         `> ${truncate(payload.stream.title, 220)}`,
-        "",
-        "Тестовая копия боевого уведомления отправлена в отдельный канал.",
         "",
         `[Смотреть на Twitch](${payload.stream.channelUrl})`
       ].join("\n"),
@@ -2794,8 +2784,8 @@ function buildTestDiscordEmbeds(payload, channelConfig, startedAtLabel) {
           inline: true
         },
         {
-          name: "Статус",
-          value: "Тест • @everyone",
+          name: "Пинг",
+          value: mentionLabel,
           inline: true
         }
       ],
@@ -2804,10 +2794,7 @@ function buildTestDiscordEmbeds(payload, channelConfig, startedAtLabel) {
             url: previewImageUrl
           }
         : undefined,
-      footer: {
-        text: `${payload.app.name} • тестовый прогон`
-      },
-      timestamp: payload.stream.startedAt
+      timestamp: undefined
     }
   ];
 }

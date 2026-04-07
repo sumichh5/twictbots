@@ -497,12 +497,14 @@ function buildDiscordTestCommands() {
     {
       name: "testbot",
       description: "Открыть тестовое меню настройки Twitch-уведомлений",
-      type: 1
+      type: 1,
+      default_member_permissions: String(MANAGE_GUILD_PERMISSION)
     },
     {
       name: "testcheck",
       description: "Проверить Twitch-канал и отправить тестовое сообщение",
       type: 1,
+      default_member_permissions: String(MANAGE_GUILD_PERMISSION),
       options: [
         {
           type: APPLICATION_COMMAND_OPTION_TYPE_STRING,

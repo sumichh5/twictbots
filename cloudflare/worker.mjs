@@ -9,12 +9,30 @@ const DEFAULT_STREAMERS_JSON = JSON.stringify({
 });
 
 const STATE_KEY = "state:v1";
+const DISCORD_TEST_CONFIG_PREFIX = "discord-test-config:v1:";
 const LEVELS = {
   debug: 10,
   info: 20,
   warn: 30,
   error: 40
 };
+const EPHEMERAL_FLAG = 64;
+const BUTTON_STYLE_PRIMARY = 1;
+const BUTTON_STYLE_SECONDARY = 2;
+const BUTTON_STYLE_DANGER = 4;
+const COMPONENT_TYPE_ACTION_ROW = 1;
+const COMPONENT_TYPE_BUTTON = 2;
+const COMPONENT_TYPE_TEXT_INPUT = 4;
+const INTERACTION_TYPE_PING = 1;
+const INTERACTION_TYPE_APPLICATION_COMMAND = 2;
+const INTERACTION_TYPE_MESSAGE_COMPONENT = 3;
+const INTERACTION_TYPE_MODAL_SUBMIT = 5;
+const INTERACTION_RESPONSE_PONG = 1;
+const INTERACTION_RESPONSE_CHANNEL_MESSAGE_WITH_SOURCE = 4;
+const INTERACTION_RESPONSE_UPDATE_MESSAGE = 7;
+const INTERACTION_RESPONSE_MODAL = 9;
+const ADMINISTRATOR_PERMISSION = 8n;
+const MANAGE_GUILD_PERMISSION = 32n;
 
 let warnedNoChannels = false;
 let twitchTokenCache = {
@@ -32,6 +50,10 @@ export default {
     const summary = summarizeConfiguration(env);
     const url = new URL(request.url);
 
+    if (url.pathname === "/discord/interactions" && request.method === "POST") {
+      return handleDiscordInteractionRequest(request, env);
+    }
+
     if (url.pathname === "/health") {
       return jsonResponse({
         ok: summary.ready,
@@ -43,6 +65,10 @@ export default {
 
     if (url.pathname === "/test/discord") {
       return handleDiscordTestRequest(request, env);
+    }
+
+    if (url.pathname === "/test/discord/register-commands") {
+      return handleDiscordCommandRegistrationRequest(request, env);
     }
 
     return jsonResponse({
@@ -62,22 +88,36 @@ export default {
 
 async function runMonitor(env, logger) {
   const config = loadConfig(env, { strict: true });
+  const testSubscriptions = await loadDiscordTestSubscriptions(env);
+  const monitorStreamers = mergeConfiguredStreamers(config.streamers, testSubscriptions);
+  const resolutionConfig = {
+    ...config,
+    streamers: monitorStreamers
+  };
+
   logger.info("Starting scheduled Twitch check.", {
     appName: config.app.name,
     streamers: config.streamers.map((streamer) => streamer.login),
+    testSubscriptions: testSubscriptions.length,
     telegramEnabled: config.telegram.enabled,
     discordEnabled: config.discord.enabled,
     discordTestEnabled: config.discordTest.enabled
   });
 
   const state = await loadState(env);
-  const resolvedStreamers = await resolveStreamers(config, logger);
-  const liveByUserId = await getLiveStreams(config, resolvedStreamers, logger);
+  const resolvedStreamers = await resolveStreamers(resolutionConfig, logger);
+  const resolvedStreamersByLogin = new Map(resolvedStreamers.map((streamer) => [streamer.login, streamer]));
+  const liveByUserId = await getLiveStreams(resolutionConfig, resolvedStreamers, logger);
 
   let dirty = false;
   let delivered = 0;
 
-  for (const streamer of resolvedStreamers) {
+  for (const configuredStreamer of config.streamers) {
+    const streamer = resolvedStreamersByLogin.get(configuredStreamer.login);
+    if (!streamer) {
+      continue;
+    }
+
     const liveStream = liveByUserId.get(streamer.userId);
 
     if (!liveStream) {
@@ -116,6 +156,20 @@ async function runMonitor(env, logger) {
         });
       }
     }
+  }
+
+  if (testSubscriptions.length > 0) {
+    const subscriptionResult = await processDiscordTestSubscriptions(
+      state,
+      config,
+      resolvedStreamersByLogin,
+      liveByUserId,
+      testSubscriptions,
+      logger
+    );
+
+    dirty = dirty || subscriptionResult.dirty;
+    delivered += subscriptionResult.delivered;
   }
 
   if (dirty) {
@@ -167,6 +221,583 @@ async function handleDiscordTestRequest(request, env) {
   });
 }
 
+async function handleDiscordCommandRegistrationRequest(incomingRequest, env) {
+  const auth = authorizeTestRequest(incomingRequest, env);
+  if (!auth.ok) {
+    return jsonResponse(
+      {
+        ok: false,
+        message: auth.message
+      },
+      { status: auth.status }
+    );
+  }
+
+  const logger = createLogger(env);
+  const config = loadConfig(env, { strict: false });
+  if (!isDiscordBotTestModeReady(config)) {
+    return jsonResponse(
+      {
+        ok: false,
+        message: "Discord bot test mode is not ready. Configure DISCORD_BOT_TOKEN, DISCORD_TEST_CHANNEL_ID, DISCORD_APPLICATION_ID, and DISCORD_PUBLIC_KEY."
+      },
+      { status: 503 }
+    );
+  }
+
+  const url = new URL(incomingRequest.url);
+  const scope = String(url.searchParams.get("scope") || "guild").trim().toLowerCase();
+  const guildId = readString(url.searchParams.get("guild_id"), config.discordBotTestMode.testGuildId);
+  if (scope !== "guild" && scope !== "global") {
+    return jsonResponse(
+      {
+        ok: false,
+        message: "Invalid scope. Use guild or global."
+      },
+      { status: 400 }
+    );
+  }
+
+  if (scope === "guild" && !guildId) {
+    return jsonResponse(
+      {
+        ok: false,
+        message: "Guild scope requires DISCORD_TEST_GUILD_ID or ?guild_id=..."
+      },
+      { status: 400 }
+    );
+  }
+
+  const endpoint =
+    scope === "global"
+      ? `https://discord.com/api/v10/applications/${config.discordBotTestMode.applicationId}/commands`
+      : `https://discord.com/api/v10/applications/${config.discordBotTestMode.applicationId}/guilds/${guildId}/commands`;
+
+  const commands = await request(endpoint, {
+    method: "PUT",
+    headers: {
+      Authorization: `Bot ${config.discordTest.botToken}`
+    },
+    body: buildDiscordTestCommands(),
+    timeoutMs: config.app.requestTimeoutMs,
+    retries: config.app.maxRetries,
+    retryLabel: "Discord command registration",
+    logger
+  });
+
+  return jsonResponse({
+    ok: true,
+    scope,
+    guildId: scope === "guild" ? guildId : null,
+    commands: Array.isArray(commands)
+      ? commands.map((command) => ({
+          id: command.id,
+          name: command.name,
+          description: command.description
+        }))
+      : []
+  });
+}
+
+async function handleDiscordInteractionRequest(request, env) {
+  const logger = createLogger(env);
+  const config = loadConfig(env, { strict: false });
+
+  if (!config.discordBotTestMode.enabled) {
+    return jsonResponse(
+      {
+        ok: false,
+        message: "Discord bot test mode is disabled."
+      },
+      { status: 404 }
+    );
+  }
+
+  const signature = request.headers.get("x-signature-ed25519");
+  const timestamp = request.headers.get("x-signature-timestamp");
+  const rawBody = await request.text();
+  const isValid = await verifyDiscordInteractionSignature(
+    rawBody,
+    signature,
+    timestamp,
+    config.discordBotTestMode.publicKey
+  );
+
+  if (!isValid) {
+    return new Response("Invalid Discord signature.", { status: 401 });
+  }
+
+  let interaction;
+  try {
+    interaction = JSON.parse(rawBody);
+  } catch (error) {
+    logger.error("Failed to parse Discord interaction payload.", error);
+    return new Response("Invalid JSON payload.", { status: 400 });
+  }
+
+  try {
+    if (interaction.type === INTERACTION_TYPE_PING) {
+      return interactionResponse({
+        type: INTERACTION_RESPONSE_PONG
+      });
+    }
+
+    if (interaction.type === INTERACTION_TYPE_APPLICATION_COMMAND) {
+      return handleDiscordApplicationCommand(interaction, env, config);
+    }
+
+    if (interaction.type === INTERACTION_TYPE_MESSAGE_COMPONENT) {
+      return handleDiscordMessageComponent(interaction, env, config);
+    }
+
+    if (interaction.type === INTERACTION_TYPE_MODAL_SUBMIT) {
+      return handleDiscordModalSubmit(interaction, env, config, logger);
+    }
+
+    return interactionMessage("Этот тип взаимодействия пока не поддерживается.");
+  } catch (error) {
+    logger.error("Discord interaction handling failed.", error);
+    return interactionMessage("Не получилось обработать запрос. Попробуй ещё раз через пару секунд.");
+  }
+}
+
+async function handleDiscordApplicationCommand(interaction, env, config) {
+  if (interaction.data && interaction.data.name !== "testbot") {
+    return interactionMessage("Неизвестная тестовая команда.");
+  }
+
+  if (!interaction.guild_id) {
+    return interactionMessage("Тестовое меню доступно только внутри сервера Discord.");
+  }
+
+  if (!memberHasGuildSetupPermission(interaction)) {
+    return interactionMessage("Для настройки нужен доступ Manage Server или Administrator.");
+  }
+
+  const existingConfig = await loadDiscordTestGuildConfig(env, interaction.guild_id);
+  return interactionResponse({
+    type: INTERACTION_RESPONSE_CHANNEL_MESSAGE_WITH_SOURCE,
+    data: {
+      flags: EPHEMERAL_FLAG,
+      ...buildDiscordTestMenuData(existingConfig, interaction.channel_id, "Тестовый режим настройки открыт.")
+    }
+  });
+}
+
+async function handleDiscordMessageComponent(interaction, env, config) {
+  if (!interaction.guild_id) {
+    return interactionMessage("Тестовое меню доступно только внутри сервера Discord.");
+  }
+
+  if (!memberHasGuildSetupPermission(interaction)) {
+    return interactionMessage("Для настройки нужен доступ Manage Server или Administrator.");
+  }
+
+  const customId = String(interaction.data && interaction.data.custom_id ? interaction.data.custom_id : "");
+  const existingConfig = await loadDiscordTestGuildConfig(env, interaction.guild_id);
+
+  if (customId === "testbot:open_setup") {
+    return interactionResponse({
+      type: INTERACTION_RESPONSE_MODAL,
+      data: buildDiscordSetupModal(existingConfig, interaction.channel_id)
+    });
+  }
+
+  if (customId === "testbot:show_status") {
+    return interactionResponse({
+      type: INTERACTION_RESPONSE_UPDATE_MESSAGE,
+      data: buildDiscordTestMenuData(existingConfig, interaction.channel_id, "Статус обновлён.")
+    });
+  }
+
+  if (customId === "testbot:disable") {
+    await deleteDiscordTestGuildConfig(env, interaction.guild_id);
+    return interactionResponse({
+      type: INTERACTION_RESPONSE_UPDATE_MESSAGE,
+      data: buildDiscordTestMenuData(null, interaction.channel_id, "Тестовая настройка для этого сервера отключена.")
+    });
+  }
+
+  return interactionMessage("Неизвестная кнопка в тестовом меню.");
+}
+
+async function handleDiscordModalSubmit(interaction, env, config, logger) {
+  if (!interaction.guild_id) {
+    return interactionMessage("Тестовая настройка доступна только внутри сервера Discord.");
+  }
+
+  if (!memberHasGuildSetupPermission(interaction)) {
+    return interactionMessage("Для настройки нужен доступ Manage Server или Administrator.");
+  }
+
+  const customId = String(interaction.data && interaction.data.custom_id ? interaction.data.custom_id : "");
+  if (customId !== "testbot:setup_modal") {
+    return interactionMessage("Неизвестная форма настройки.");
+  }
+
+  const values = readDiscordModalValues(interaction);
+  const streamerInput = extractTwitchLogin(values.streamer_login);
+  const mentionEveryone = parseYesNo(values.mention_everyone, config.discordTest.mentionEveryone);
+  const channelId = normalizeDiscordChannelId(values.channel_id) || interaction.channel_id;
+
+  if (!streamerInput) {
+    return interactionMessage("Нужно указать Twitch login или ссылку на канал.");
+  }
+
+  if (!normalizeDiscordChannelId(channelId)) {
+    return interactionMessage("ID Discord-канала выглядит неверно.");
+  }
+
+  const resolvedStreamer = await resolveSingleStreamer(streamerInput, config, logger);
+  if (!resolvedStreamer) {
+    return interactionMessage("Не смог найти такой Twitch-канал. Проверь login и попробуй снова.");
+  }
+
+  const savedConfig = {
+    guildId: interaction.guild_id,
+    guildName: interaction.guild && interaction.guild.name ? interaction.guild.name : "",
+    channelId,
+    streamerLogin: resolvedStreamer.login,
+    streamerDisplayName: resolvedStreamer.displayName,
+    mentionEveryone,
+    updatedAt: new Date().toISOString(),
+    updatedByUserId: getInteractionUserId(interaction)
+  };
+
+  await saveDiscordTestGuildConfig(env, interaction.guild_id, savedConfig);
+
+  return interactionResponse({
+    type: INTERACTION_RESPONSE_CHANNEL_MESSAGE_WITH_SOURCE,
+    data: {
+      flags: EPHEMERAL_FLAG,
+      ...buildDiscordTestMenuData(
+        savedConfig,
+        channelId,
+        `Сохранено: отслеживаем ${resolvedStreamer.displayName} и шлём уведомления в <#${channelId}>.`
+      )
+    }
+  });
+}
+
+function buildDiscordTestCommands() {
+  return [
+    {
+      name: "testbot",
+      description: "Открыть тестовое меню настройки Twitch-уведомлений",
+      type: 1,
+      contexts: [0],
+      integration_types: [0],
+      default_member_permissions: String(MANAGE_GUILD_PERMISSION)
+    }
+  ];
+}
+
+function buildDiscordTestMenuData(savedConfig, currentChannelId, notice = "") {
+  const activeChannelId = savedConfig && savedConfig.channelId ? savedConfig.channelId : currentChannelId;
+  const isConfigured = Boolean(savedConfig);
+
+  return {
+    embeds: [
+      {
+        color: 0xe11d48,
+        title: "Тестовое меню Twitch-бота",
+        description: notice || "Через это меню можно сохранить тестовую настройку сервера без влияния на основной прод-поток.",
+        fields: [
+          {
+            name: "Режим",
+            value: "Только TEST",
+            inline: true
+          },
+          {
+            name: "Twitch",
+            value: isConfigured ? `\`${savedConfig.streamerLogin}\`` : "ещё не настроен",
+            inline: true
+          },
+          {
+            name: "Канал Discord",
+            value: activeChannelId ? `<#${activeChannelId}>` : "текущий канал",
+            inline: true
+          },
+          {
+            name: "Пинг",
+            value: isConfigured ? (savedConfig.mentionEveryone ? "@everyone" : "без пинга") : "по умолчанию",
+            inline: true
+          }
+        ],
+        footer: {
+          text: isConfigured ? `Обновлено: ${formatLocalDateTime(savedConfig.updatedAt, "Europe/Kiev")}` : "Конфиг для сервера ещё не сохранён"
+        }
+      }
+    ],
+    components: [
+      {
+        type: COMPONENT_TYPE_ACTION_ROW,
+        components: [
+          buildButton("testbot:open_setup", "Настроить", BUTTON_STYLE_PRIMARY),
+          buildButton("testbot:show_status", "Статус", BUTTON_STYLE_SECONDARY),
+          buildButton("testbot:disable", "Отключить", BUTTON_STYLE_DANGER)
+        ]
+      }
+    ]
+  };
+}
+
+function buildDiscordSetupModal(savedConfig, currentChannelId) {
+  return {
+    custom_id: "testbot:setup_modal",
+    title: "Настройка Twitch TEST",
+    components: [
+      buildTextInputRow("streamer_login", "Twitch login или ссылка", savedConfig ? savedConfig.streamerLogin : "wooflyaa"),
+      buildTextInputRow(
+        "channel_id",
+        "ID канала Discord (пусто = текущий)",
+        savedConfig && savedConfig.channelId ? savedConfig.channelId : currentChannelId,
+        false
+      ),
+      buildTextInputRow(
+        "mention_everyone",
+        "Пинг everyone? yes / no",
+        savedConfig && savedConfig.mentionEveryone ? "yes" : "no"
+      )
+    ]
+  };
+}
+
+function buildButton(customId, label, style) {
+  return {
+    type: COMPONENT_TYPE_BUTTON,
+    custom_id: customId,
+    label,
+    style
+  };
+}
+
+function buildTextInputRow(customId, label, value, required = true) {
+  return {
+    type: COMPONENT_TYPE_ACTION_ROW,
+    components: [
+      {
+        type: COMPONENT_TYPE_TEXT_INPUT,
+        custom_id: customId,
+        label,
+        style: 1,
+        required,
+        value: String(value || "").slice(0, 100),
+        max_length: 100
+      }
+    ]
+  };
+}
+
+function interactionMessage(content) {
+  return interactionResponse({
+    type: INTERACTION_RESPONSE_CHANNEL_MESSAGE_WITH_SOURCE,
+    data: {
+      flags: EPHEMERAL_FLAG,
+      content
+    }
+  });
+}
+
+function interactionResponse(payload, status = 200) {
+  return new Response(JSON.stringify(payload), {
+    status,
+    headers: {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store"
+    }
+  });
+}
+
+function memberHasGuildSetupPermission(interaction) {
+  const permissions = BigInt(readString(interaction.member && interaction.member.permissions, "0"));
+  return (permissions & ADMINISTRATOR_PERMISSION) !== 0n || (permissions & MANAGE_GUILD_PERMISSION) !== 0n;
+}
+
+function readDiscordModalValues(interaction) {
+  const values = {};
+  const rows = Array.isArray(interaction.data && interaction.data.components) ? interaction.data.components : [];
+
+  for (const row of rows) {
+    const components = Array.isArray(row.components) ? row.components : [];
+    for (const component of components) {
+      if (component && component.custom_id) {
+        values[component.custom_id] = readString(component.value);
+      }
+    }
+  }
+
+  return values;
+}
+
+function normalizeDiscordChannelId(value) {
+  const raw = readString(value);
+  return /^\d{16,20}$/.test(raw) ? raw : "";
+}
+
+function parseYesNo(value, fallback = false) {
+  const raw = readString(value).toLowerCase();
+  if (!raw) {
+    return fallback;
+  }
+
+  if (["1", "true", "yes", "y", "да", "on"].includes(raw)) {
+    return true;
+  }
+
+  if (["0", "false", "no", "n", "нет", "off"].includes(raw)) {
+    return false;
+  }
+
+  return fallback;
+}
+
+function getInteractionUserId(interaction) {
+  return readString(
+    interaction.member && interaction.member.user && interaction.member.user.id
+      ? interaction.member.user.id
+      : interaction.user && interaction.user.id
+        ? interaction.user.id
+        : ""
+  );
+}
+
+async function verifyDiscordInteractionSignature(rawBody, signature, timestamp, publicKey) {
+  const signatureHex = readString(signature);
+  const timestampValue = readString(timestamp);
+  const publicKeyHex = readString(publicKey);
+  if (!signatureHex || !timestampValue || !publicKeyHex) {
+    return false;
+  }
+
+  try {
+    const encoder = new TextEncoder();
+    const message = encoder.encode(`${timestampValue}${rawBody}`);
+    const keyBytes = hexToBytes(publicKeyHex);
+    const signatureBytes = hexToBytes(signatureHex);
+    const cryptoKey = await crypto.subtle.importKey("raw", keyBytes, { name: "Ed25519" }, false, ["verify"]);
+
+    return crypto.subtle.verify({ name: "Ed25519" }, cryptoKey, signatureBytes, message);
+  } catch (_error) {
+    return false;
+  }
+}
+
+function hexToBytes(value) {
+  const normalized = readString(value).toLowerCase();
+  const bytes = new Uint8Array(normalized.length / 2);
+
+  for (let index = 0; index < normalized.length; index += 2) {
+    bytes[index / 2] = Number.parseInt(normalized.slice(index, index + 2), 16);
+  }
+
+  return bytes;
+}
+
+function getDiscordTestGuildConfigKey(guildId) {
+  return `${DISCORD_TEST_CONFIG_PREFIX}${guildId}`;
+}
+
+async function loadDiscordTestGuildConfig(env, guildId) {
+  if (!env.STATE_KV || !guildId) {
+    return null;
+  }
+
+  const stored = await env.STATE_KV.get(getDiscordTestGuildConfigKey(guildId), { type: "json" });
+  return normalizeDiscordTestSubscriptionRecord(stored);
+}
+
+async function saveDiscordTestGuildConfig(env, guildId, config) {
+  await env.STATE_KV.put(getDiscordTestGuildConfigKey(guildId), JSON.stringify(config));
+}
+
+async function deleteDiscordTestGuildConfig(env, guildId) {
+  if (!env.STATE_KV || !guildId) {
+    return;
+  }
+
+  await env.STATE_KV.delete(getDiscordTestGuildConfigKey(guildId));
+}
+
+async function loadDiscordTestSubscriptions(env) {
+  if (!env.STATE_KV) {
+    return [];
+  }
+
+  const result = [];
+  let cursor;
+
+  do {
+    const page = await env.STATE_KV.list({
+      prefix: DISCORD_TEST_CONFIG_PREFIX,
+      cursor
+    });
+
+    for (const entry of page.keys) {
+      const config = await env.STATE_KV.get(entry.name, { type: "json" });
+      const normalized = normalizeDiscordTestSubscriptionRecord(config);
+      if (normalized) {
+        result.push(normalized);
+      }
+    }
+
+    cursor = page.list_complete ? undefined : page.cursor;
+  } while (cursor);
+
+  return result;
+}
+
+function normalizeDiscordTestSubscriptionRecord(value) {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const guildId = readString(value.guildId);
+  const channelId = normalizeDiscordChannelId(value.channelId);
+  const streamerLogin = extractTwitchLogin(value.streamerLogin);
+  if (!guildId || !channelId || !streamerLogin) {
+    return null;
+  }
+
+  return {
+    guildId,
+    guildName: readString(value.guildName),
+    channelId,
+    streamerLogin,
+    streamerDisplayName: readString(value.streamerDisplayName, streamerLogin),
+    mentionEveryone: Boolean(value.mentionEveryone),
+    updatedAt: readString(value.updatedAt),
+    updatedByUserId: readString(value.updatedByUserId)
+  };
+}
+
+async function resolveSingleStreamer(login, config, logger) {
+  try {
+    const resolved = await resolveStreamers(
+      {
+        ...config,
+        streamers: [
+          {
+            login,
+            label: login,
+            accentColor: "#E11D48",
+            profileImageUrl: ""
+          }
+        ]
+      },
+      logger
+    );
+
+    return resolved[0] || null;
+  } catch (error) {
+    if (error && typeof error.message === "string" && error.message.startsWith("Twitch users not found:")) {
+      return null;
+    }
+
+    throw error;
+  }
+}
+
 function summarizeConfiguration(env) {
   try {
     const config = loadConfig(env, { strict: false });
@@ -186,6 +817,10 @@ function summarizeConfiguration(env) {
         discord: config.discord.enabled ? config.discord.transport : "disabled",
         discordTest: config.discordTest.enabled ? config.discordTest.transport : "disabled"
       },
+      features: {
+        discordBotTestMode: config.discordBotTestMode.enabled,
+        discordBotTestModeReady: isDiscordBotTestModeReady(config)
+      },
       stateKvBound: Boolean(env.STATE_KV),
       missing: config.missing
     };
@@ -202,6 +837,10 @@ function summarizeConfiguration(env) {
       transports: {
         discord: "disabled",
         discordTest: "disabled"
+      },
+      features: {
+        discordBotTestMode: false,
+        discordBotTestModeReady: false
       },
       stateKvBound: Boolean(env.STATE_KV),
       missing: [error.message]
@@ -241,6 +880,12 @@ function loadConfig(env, options = {}) {
   const discordTestRequested = Boolean(
     discordTestWebhookUrl || readString(env.DISCORD_TEST_BOT_TOKEN) || discordTestChannelId
   );
+  const discordBotTestMode = {
+    enabled: readBoolean(env.ENABLE_DISCORD_BOT_TEST_MODE, false),
+    applicationId: readString(env.DISCORD_APPLICATION_ID),
+    publicKey: readString(env.DISCORD_PUBLIC_KEY),
+    testGuildId: readString(env.DISCORD_TEST_GUILD_ID)
+  };
 
   const telegram = {
     enabled: telegramRequested && Boolean(readString(env.TELEGRAM_BOT_TOKEN) && readString(env.TELEGRAM_CHAT_ID)),
@@ -304,7 +949,6 @@ function loadConfig(env, options = {}) {
   if (discordTestRequested && !discordTest.enabled) {
     missing.push("DISCORD_TEST_WEBHOOK_URL or DISCORD_TEST_BOT_TOKEN/DISCORD_BOT_TOKEN + DISCORD_TEST_CHANNEL_ID");
   }
-
   if (strict && missing.length > 0) {
     throw new Error(`Missing required configuration: ${missing.join(", ")}`);
   }
@@ -315,6 +959,7 @@ function loadConfig(env, options = {}) {
     telegram,
     discord,
     discordTest,
+    discordBotTestMode,
     streamers,
     missing
   };
@@ -928,6 +1573,9 @@ async function loadState(env) {
   if (!raw.streamers || typeof raw.streamers !== "object") {
     raw.streamers = {};
   }
+  if (!raw.subscriptions || typeof raw.subscriptions !== "object") {
+    raw.subscriptions = {};
+  }
 
   return raw;
 }
@@ -939,7 +1587,8 @@ async function saveState(env, state) {
 function createDefaultState() {
   return {
     version: 1,
-    streamers: {}
+    streamers: {},
+    subscriptions: {}
   };
 }
 
@@ -1008,6 +1657,58 @@ function markNotified(state, login, channelName, streamId) {
   };
 }
 
+function getSubscriptionEntry(state, subscriptionKey, login) {
+  if (!state.subscriptions[subscriptionKey]) {
+    state.subscriptions[subscriptionKey] = createDefaultStreamerState(login);
+  }
+
+  return state.subscriptions[subscriptionKey];
+}
+
+function markSubscriptionLive(state, subscriptionKey, login, stream) {
+  const entry = getSubscriptionEntry(state, subscriptionKey, login);
+  const changed =
+    !entry.isLive ||
+    entry.currentStreamId !== stream.id ||
+    entry.lastSeenTitle !== stream.title ||
+    entry.lastSeenGame !== stream.gameName;
+
+  entry.isLive = true;
+  entry.currentStreamId = stream.id;
+  entry.currentStreamStartedAt = stream.startedAt;
+  entry.lastSeenTitle = stream.title;
+  entry.lastSeenGame = stream.gameName;
+
+  return { entry, changed };
+}
+
+function markSubscriptionOffline(state, subscriptionKey, login) {
+  const entry = getSubscriptionEntry(state, subscriptionKey, login);
+  if (!entry.isLive && !entry.currentStreamId) {
+    return { entry, changed: false };
+  }
+
+  entry.isLive = false;
+  entry.currentStreamId = null;
+  entry.currentStreamStartedAt = null;
+  entry.lastOfflineAt = new Date().toISOString();
+
+  return { entry, changed: true };
+}
+
+function wasSubscriptionNotified(state, subscriptionKey, channelName, streamId) {
+  const entry = getSubscriptionEntry(state, subscriptionKey, "");
+  return entry.notifications[channelName] && entry.notifications[channelName].lastNotifiedStreamId === streamId;
+}
+
+function markSubscriptionNotified(state, subscriptionKey, login, channelName, streamId) {
+  const entry = getSubscriptionEntry(state, subscriptionKey, login);
+  entry.notifications[channelName] = {
+    lastNotifiedStreamId: streamId,
+    lastNotifiedAt: new Date().toISOString()
+  };
+}
+
 function createPayload(config, streamer, stream) {
   return {
     app: {
@@ -1019,6 +1720,141 @@ function createPayload(config, streamer, stream) {
       ...stream,
       channelUrl: streamer.channelUrl
     }
+  };
+}
+
+function isDiscordBotTestModeReady(config) {
+  return Boolean(
+    config.discordBotTestMode &&
+      config.discordBotTestMode.enabled &&
+      config.discordBotTestMode.applicationId &&
+      config.discordBotTestMode.publicKey &&
+      config.discordTest.botToken
+  );
+}
+
+function mergeConfiguredStreamers(baseStreamers, subscriptions) {
+  const seen = new Set();
+  const result = [];
+
+  for (const streamer of baseStreamers) {
+    if (seen.has(streamer.login)) {
+      continue;
+    }
+
+    seen.add(streamer.login);
+    result.push(streamer);
+  }
+
+  for (const subscription of subscriptions) {
+    if (!subscription || seen.has(subscription.streamerLogin)) {
+      continue;
+    }
+
+    seen.add(subscription.streamerLogin);
+    result.push({
+      login: subscription.streamerLogin,
+      label: subscription.streamerDisplayName || subscription.streamerLogin,
+      accentColor: "#E11D48",
+      profileImageUrl: ""
+    });
+  }
+
+  return result;
+}
+
+function buildDiscordTestSubscriptionKey(subscription) {
+  return `discord-test:${subscription.guildId}:${subscription.streamerLogin}`;
+}
+
+function createDiscordTestSubscriptionChannelConfig(config, subscription) {
+  return {
+    ...config.discordTest,
+    enabled: true,
+    transport: "bot",
+    channelId: subscription.channelId,
+    mentionEveryone: subscription.mentionEveryone
+  };
+}
+
+async function processDiscordTestSubscriptions(
+  state,
+  config,
+  resolvedStreamersByLogin,
+  liveByUserId,
+  subscriptions,
+  logger
+) {
+  if (!isDiscordBotTestModeReady(config) || subscriptions.length === 0) {
+    return {
+      dirty: false,
+      delivered: 0
+    };
+  }
+
+  let dirty = false;
+  let delivered = 0;
+
+  for (const subscription of subscriptions) {
+    const streamer = resolvedStreamersByLogin.get(subscription.streamerLogin);
+    if (!streamer) {
+      logger.warn("Skipping Discord test subscription because streamer resolution failed.", {
+        guildId: subscription.guildId,
+        streamer: subscription.streamerLogin
+      });
+      continue;
+    }
+
+    const subscriptionKey = buildDiscordTestSubscriptionKey(subscription);
+    const liveStream = liveByUserId.get(streamer.userId);
+
+    if (!liveStream) {
+      const offline = markSubscriptionOffline(state, subscriptionKey, subscription.streamerLogin);
+      dirty = dirty || offline.changed;
+      continue;
+    }
+
+    const live = markSubscriptionLive(state, subscriptionKey, subscription.streamerLogin, liveStream);
+    dirty = dirty || live.changed;
+    if (live.changed) {
+      logger.info("Live stream detected for Discord test subscription.", {
+        guildId: subscription.guildId,
+        channelId: subscription.channelId,
+        streamer: subscription.streamerLogin,
+        streamId: liveStream.id
+      });
+    }
+
+    if (wasSubscriptionNotified(state, subscriptionKey, "discord_test_public", liveStream.id)) {
+      continue;
+    }
+
+    const payload = createPayload(config, streamer, liveStream);
+
+    try {
+      await sendDiscordAlert(payload, createDiscordTestSubscriptionChannelConfig(config, subscription), logger);
+      markSubscriptionNotified(state, subscriptionKey, subscription.streamerLogin, "discord_test_public", liveStream.id);
+      dirty = true;
+      delivered += 1;
+      logger.info("Discord test subscription alert sent.", {
+        guildId: subscription.guildId,
+        channelId: subscription.channelId,
+        streamer: subscription.streamerLogin,
+        streamId: liveStream.id
+      });
+    } catch (error) {
+      logger.error("Failed to deliver Discord test subscription alert.", {
+        guildId: subscription.guildId,
+        channelId: subscription.channelId,
+        streamer: subscription.streamerLogin,
+        error: error.message
+      });
+    }
+  }
+
+  return {
+    dirty,
+    delivered
   };
 }
 
